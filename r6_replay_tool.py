@@ -15,6 +15,7 @@ Sorties (dossier -o, par défaut "sortie_<nom du replay>") :
     manche.html           lecteur interactif : carte vue de dessus, curseur de temps, lecture, événements
     evenements.csv        kills et messages datés (temps du replay, phase, chrono affiché en jeu)
     positions.csv         une ligne par position : joueur, opérateur, équipe, temps, x, y, z
+    orientations.csv      direction du regard : lacet (horizontal) et, quand la caméra est trouvée, tangage
     trajectoires.png      vue d'ensemble, tous les joueurs nommés
     resume.txt            en-tête, horloge, correspondance entités -> joueurs, couverture des données
 
@@ -27,6 +28,8 @@ COMMENT LE FICHIER EST ORGANISÉ (déduit d'un replay Y11S3_Alpha04)
     - Les objets du jeu sont des entités identifiées par un u32 (0xF00Dxxxx pour les joueurs).
       Leurs positions sont des paquets  <entité><0><champ> 60 73 85 FE <sous-type> <x y z float32>
       (canal principal) ou  <entité><0> <x y z float32> <0>  (canal des positions).
+    - L'orientation (lacet) est un vecteur unitaire  <entité><0> <x y 0> <0>  du canal des positions ;
+      la caméra (avec le tangage) est un vecteur unitaire 3D indexé par une adresse mémoire.
     - L'horloge de la manche est un paquet  18 37 46 6C 04 <u32 millisecondes restantes>.
     - Le fil d'événements (kills, messages) est un paquet  59 34 E5 8B 04 ...
 
@@ -404,6 +407,95 @@ def clean_track(a):
     return a
 
 
+def read_facing(raw, fi, tracks):
+    """Orientation des joueurs : {entité: tableau (image, lacet°, tangage°)}.
+    - lacet (direction horizontale) : vecteur unitaire <entité><0> <x y 0> <0> du canal des positions ;
+    - tangage (regard vers le haut/bas) : vecteur unitaire 3D de la caméra, indexé par une adresse mémoire.
+      Une caméra est rattachée au joueur dont le lacet colle à sa direction horizontale ; on ne garde
+      un échantillon que s'il reste proche du lacet du corps (< 45°), car les adresses mémoire
+      sont réutilisées par d'autres objets.
+    Angles en degrés ; lacet = atan2(y, x), dans le repère de la carte. Tangage NaN si inconnu."""
+    yaw = collections.defaultdict(list)
+    for m in re.finditer(ENTITY_RX, raw, re.S):
+        o = m.start()
+        if o + 24 > len(raw):
+            continue
+        e = struct.unpack_from("<I", raw, o)[0]
+        if e not in tracks:
+            continue
+        x, y, z, w = struct.unpack_from("<3fI", raw, o + 8)
+        if w == 0 and z == 0 and math.isfinite(x) and math.isfinite(y) and abs(math.hypot(x, y) - 1) < 0.01:
+            yaw[e].append((o, math.degrees(math.atan2(y, x))))
+    out = {}
+    for e, v in yaw.items():
+        fr = fi.frame([o for o, _ in v])
+        a = np.array([(f, d, np.nan) for f, (_, d) in zip(fr, v)])
+        out[e] = a[np.argsort(a[:, 0], kind="stable")]
+
+    # caméras : adresse mémoire portant à la fois des positions (qui collent au joueur) et des directions 3D
+    cams = collections.defaultdict(list)
+    for m in re.finditer(PTR_RX, raw, re.S):
+        o = m.start()
+        if o + 24 > len(raw):
+            continue
+        x, y, z, w = struct.unpack_from("<3fI", raw, o + 8)
+        if w == 0 and math.isfinite(x) and math.isfinite(y) and math.isfinite(z) \
+                and abs(math.sqrt(x * x + y * y + z * z) - 1) < 0.01 and abs(z) < 0.999:
+            cams[struct.unpack_from("<Q", raw, o)[0]].append((o, x, y, z))
+    # chaque caméra est rattachée au joueur dont le lacet du corps colle à sa direction horizontale
+    # (écart < 10° dans au moins 40 % des cas, et au moins 3 fois plus souvent qu'avec n'importe qui d'autre)
+    body = {e: a for e, a in out.items()}
+    rows = collections.defaultdict(list)
+    for k, v in cams.items():
+        if len(v) < 100 or np.mean([abs(q[3]) > 0.01 for q in v]) < 0.8:
+            continue
+        fr = fi.frame([q[0] for q in v])
+        yw = np.degrees(np.arctan2([q[2] for q in v], [q[1] for q in v]))
+        scores = {}
+        for e, b in body.items():
+            idx = np.arange(0, len(v), max(1, len(v) // 200))
+            j = np.clip(np.searchsorted(b[:, 0], fr[idx]), 1, len(b) - 1)
+            j = np.where(np.abs(b[j, 0] - fr[idx]) < np.abs(b[j - 1, 0] - fr[idx]), j, j - 1)
+            near = np.abs(b[j, 0] - fr[idx]) <= 20
+            if near.sum() >= 30:
+                diff = np.abs((yw[idx] - b[j, 1] + 180) % 360 - 180)
+                scores[e] = float((diff[near] < 10).mean())
+        if not scores:
+            continue
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        e, s = ranked[0]
+        if s < 0.4 or (len(ranked) > 1 and s < 3 * ranked[1][1]):
+            continue
+        b = body[e]
+        for f, (_, x, y, z), w in zip(fr, v, yw):
+            i = int(np.argmin(np.abs(b[:, 0] - f)))
+            if abs(b[i, 0] - f) <= 50 and abs((w - b[i, 1] + 180) % 360 - 180) < 45:
+                rows[e].append((f, w, math.degrees(math.asin(max(-1.0, min(1.0, z))))))
+    for e, r in rows.items():
+        a = np.vstack([out[e], np.array(r)])
+        out[e] = a[np.argsort(a[:, 0], kind="stable")]
+    return out
+
+
+def resample_facing(facing, clock, t_min, t_max):
+    """Orientation pour le lecteur : [t, lacet, tangage|None], une valeur tous les VIEWER_STEP s au plus.
+    Le tangage est reporté depuis le dernier échantillon de caméra (moins de 1 s avant)."""
+    if facing is None or len(facing) == 0:
+        return []
+    t = clock.time(facing[:, 0])
+    out, last, last_pitch = [], -1e9, (None, -1e9)
+    for (f, yw, pt), tt in zip(facing, t):
+        if not t_min - 1 <= tt <= t_max:
+            continue
+        if not math.isnan(pt):
+            last_pitch = (round(float(pt)), tt)
+        if tt - last >= VIEWER_STEP:
+            pitch = last_pitch[0] if tt - last_pitch[1] <= 1.0 else None
+            out.append([round(float(tt), 2), round(float(yw), 1), pitch])
+            last = tt
+    return out
+
+
 def position_at(track, f, max_gap=200):
     i = int(np.argmin(np.abs(track[:, 0] - f)))
     return track[i, 1:4] if abs(track[i, 0] - f) <= max_gap else None
@@ -565,7 +657,7 @@ def render_html(entries, events, clock, meta, fl, outdir, title):
     data = {
         "titre": title,
         "joueurs": [{"pseudo": p["pseudo"], "operateur": p["operateur"], "role": p["role"], "couleur": p["couleur"],
-                     "entite": p["entite"], "mort": p["mort"], "points": p["points"]} for p in entries],
+                     "entite": p["entite"], "mort": p["mort"], "points": p["points"], "vue": p["vue"]} for p in entries],
         "evenements": [{k: e[k] for k in ("t", "type", "texte", "phase", "chrono", "tueur", "victime")} for e in events],
         "phases": phases,
         "etages": fl,
@@ -627,6 +719,8 @@ def main():
     tracks = read_positions(raw, fi)
     if not tracks:
         sys.exit("Aucune trajectoire de joueur trouvée.")
+    print("Extraction des orientations...")
+    facing = read_facing(raw, fi, tracks)
     ident, roles = identify(tracks, players, events, clock)
     for part in filter(None, (x.strip() for x in a.noms.split(","))):   # corrections manuelles
         if "=" in part:
@@ -657,12 +751,16 @@ def main():
             col = ATT_COLORS[n_att % len(ATT_COLORS)]; n_att += 1
         df = death.get(p["pseudo"])
         tr = tracks[e]
+        fa = facing.get(e)
         if df is not None:
             tr = tr[tr[:, 0] <= df + 150]
+            fa = fa[fa[:, 0] <= df] if fa is not None else None
+        t_tr = clock.time(tr[[0, -1], 0])
         entries.append({"pseudo": p["pseudo"], "operateur": p["operateur"], "role": role, "couleur": col,
-                        "entite": hex(e), "methode": how, "track": tr,
+                        "entite": hex(e), "methode": how, "track": tr, "facing": fa,
                         "mort": round(float(clock.time(df)), 2) if df is not None else None,
-                        "points": resample(tr, clock, df)})
+                        "points": resample(tr, clock, df),
+                        "vue": resample_facing(fa, clock, float(t_tr[0]), float(t_tr[1]))})
 
     log.append(f"Joueurs ({len(entries)} trajectoires) :" + (f"  enregistré par {rec_player}" if rec_player else ""))
     t_end = float(clock.time(clock.end_frame if clock.end_frame else clock.frames[-1]))
@@ -677,6 +775,13 @@ def main():
                    f"(identifié par : {p['methode']})  {len(p['track'])} points, de t={float(t[0]):.1f} s "
                    f"à t={float(t[-1]):.1f} s, position connue ~{100 * covered / duree:.0f} % du temps (immobilité comprise)"
                    + (f", mort à t={p['mort']:.1f} s" if p["mort"] is not None else ""))
+        fa = p["facing"]
+        if fa is None or not len(fa):
+            log.append("      orientation : aucune donnée")
+        else:
+            n_pitch = int(np.isfinite(fa[:, 2]).sum())
+            log.append(f"      orientation : {len(fa) - n_pitch} lacets (corps)"
+                       + (f", {n_pitch} directions de caméra avec tangage" if n_pitch else ", pas de caméra trouvée (tangage inconnu)"))
     known = {p["pseudo"] for p in entries}
     missing = [p["pseudo"] for p in players if p["pseudo"] not in known]
     if missing:
@@ -693,6 +798,17 @@ def main():
         w.writerow(["t_replay_s", "phase", "chrono", "image", "type", "tueur", "victime", "texte"])
         for e in events:
             w.writerow([e["t"], e["phase"], e["chrono"], e["frame"], e["type"], e["tueur"], e["victime"], e["texte"]])
+    with open(os.path.join(outdir, "orientations.csv"), "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["pseudo", "entite", "image", "t_replay_s", "lacet_deg", "tangage_deg", "source"])
+        for p in entries:
+            fa = p["facing"]
+            if fa is None:
+                continue
+            for r, t in zip(fa, clock.time(fa[:, 0])):
+                cam = not math.isnan(r[2])
+                w.writerow([p["pseudo"], p["entite"], int(r[0]), round(float(t), 2), round(float(r[1]), 1),
+                            round(float(r[2]), 1) if cam else "", "caméra" if cam else "corps"])
     with open(os.path.join(outdir, "positions.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["pseudo", "operateur", "role", "entite", "image", "t_replay_s", "x", "y", "z"])

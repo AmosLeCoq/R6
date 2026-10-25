@@ -16,9 +16,10 @@ Dans `sortie_<nom du replay>/` (ou le dossier passé avec `-o`) :
 
 | Fichier | Contenu |
 | --- | --- |
-| `manche.html` | lecteur interactif : vue de dessus, curseur de temps, lecture (espace), vitesse, traînées, filtre par niveau, liste des événements cliquable |
+| `manche.html` | lecteur interactif : vue de dessus, champ de vision de chaque joueur, curseur de temps, lecture (espace), vitesse, traînées, filtre par niveau, liste des événements cliquable |
 | `evenements.csv` | kills et messages datés : temps du replay, phase, chrono affiché en jeu, numéro d'image |
 | `positions.csv` | une ligne par position : pseudo, opérateur, rôle, entité, image, temps, x, y, z |
+| `orientations.csv` | direction du regard : lacet (horizontal, en degrés) et, quand la caméra du joueur est trouvée, tangage (+ vers le haut, − vers le bas) |
 | `trajectoires.png` | vue d'ensemble, tous les joueurs nommés |
 | `resume.txt` | en-tête (carte, version, score), phases de l'horloge, correspondance entités → joueurs, couverture des données |
 
@@ -58,6 +59,12 @@ Déduit d'un replay de la saison `Y11S3_Alpha04` :
   - canal principal : paquets de propriété `<entité u32><0 u32><champ u32> 60 73 85 FE <sous-type u16> <x y z float32>` ;
   - canal des positions : `<entité u32><0 u32> <x y z float32> <0 u32>` ;
   - certains objets de ce même canal sont indexés par une adresse mémoire 64 bits au lieu d'une entité.
+- **Orientation** (même canal, même format d'enregistrement) :
+  - lacet du corps : `<entité u32><0 u32> <x y 0 float32> <0 u32>`, vecteur unitaire horizontal ;
+  - caméra : vecteur unitaire 3D `<x y z>` indexé par une adresse mémoire ; `asin(z)` donne le tangage.
+    Une caméra est rattachée au joueur dont le lacet colle à sa direction horizontale.
+  - Vérifié sur le replay de test : au moment de chaque kill, le regard du tueur pointe vers sa victime
+    à 0–3° près, et un tir à travers le plancher apparaît bien avec un tangage vers le bas.
 
 ## Limites
 
@@ -65,6 +72,8 @@ Déduit d'un replay de la saison `Y11S3_Alpha04` :
   des adversaires, et le jeu n'envoie rien quand un joueur ne bouge pas. Un trou qui commence et finit
   au même endroit est traité comme de l'immobilité. Les autres trous sont affichés comme
   « position inconnue » (cercle vide dans le lecteur).
+- Le tangage n'est disponible que si la caméra du joueur est dans le replay (6 joueurs sur 7 dans le
+  replay de test). Sinon, seul le lacet est connu.
 - Il n'y a pas de plan de la carte : le lecteur dessine en fond l'ensemble des positions de tous les
   joueurs, ce qui dessine la forme du bâtiment.
 - Testé sur un seul replay. Les signatures d'octets peuvent changer d'une saison à l'autre.
