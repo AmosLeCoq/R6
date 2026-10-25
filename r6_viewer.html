@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay R6 · __TITRE__</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2129; --muted: #6b7280; --line: #e3e6eb;
+    --map: #ffffff; --ghost: rgba(30, 40, 60, 0.10); --grid: #eef0f3; --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111418; --panel: #1a1e24; --ink: #e8eaed; --muted: #9aa1ab; --line: #2a3038;
+      --map: #15191e; --ghost: rgba(220, 230, 245, 0.10); --grid: #1f242b; --accent: #748ffc;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111418; --panel: #1a1e24; --ink: #e8eaed; --muted: #9aa1ab; --line: #2a3038;
+    --map: #15191e; --ghost: rgba(220, 230, 245, 0.10); --grid: #1f242b; --accent: #748ffc;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; padding: 14px 16px 8px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  #clock { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 650; }
+  #phase { color: var(--muted); }
+  #tval { color: var(--muted); font-variant-numeric: tabular-nums; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; padding: 0 16px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #mapwrap { position: relative; height: min(72vh, 760px); min-height: 360px; overflow: hidden; border-radius: 10px; background: var(--map); }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  button, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #play { min-width: 76px; font-weight: 600; }
+  .timeline { position: relative; flex: 1 1 260px; min-width: 200px; height: 30px; }
+  .timeline input { width: 100%; position: absolute; top: 6px; margin: 0; }
+  .ticks { position: absolute; left: 0; right: 0; top: 0; height: 30px; pointer-events: none; }
+  .tick { position: absolute; top: 0; width: 2px; height: 8px; border-radius: 1px; }
+  .phase-mark { position: absolute; top: 22px; width: 1px; height: 8px; background: var(--muted); }
+  label.small { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  aside { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; padding: 10px 12px 6px; }
+  .player { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); cursor: pointer; user-select: none; }
+  .player.off { opacity: .4; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .psub { color: var(--muted); font-size: 12px; }
+  .status { font-size: 12px; color: var(--muted); text-align: right; white-space: nowrap; }
+  #events { max-height: 40vh; overflow-y: auto; }
+  .ev { display: grid; grid-template-columns: 54px 1fr; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--line); cursor: pointer; }
+  .ev:hover { background: var(--bg); }
+  .ev.past { opacity: .55; }
+  .ev .when { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+  .note { color: var(--muted); font-size: 12px; padding: 8px 12px 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <span id="clock">0:00</span><span id="phase"></span><span id="tval"></span>
+</header>
+<main>
+  <section class="card">
+    <div id="mapwrap"><canvas id="map"></canvas></div>
+    <div class="controls">
+      <button id="play" title="Espace">▶ Lire</button>
+      <div class="timeline">
+        <div class="ticks" id="ticks"></div>
+        <input type="range" id="slider" min="0" max="100" step="0.05" value="0" aria-label="Temps">
+      </div>
+      <label class="small">Vitesse
+        <select id="speed"><option>0.5</option><option selected>1</option><option>2</option><option>4</option><option>8</option></select>
+      </label>
+      <label class="small">Traînée
+        <select id="trail"><option value="0">aucune</option><option value="3">3 s</option><option value="10" selected>10 s</option><option value="30">30 s</option><option value="9999">tout</option></select>
+      </label>
+      <span id="floors" class="small"></span>
+    </div>
+  </section>
+  <aside>
+    <div class="card"><h2>Joueurs</h2><div id="players"></div></div>
+    <div class="card"><h2>Événements</h2><div id="events"></div>
+      <div class="note">Clique sur un événement pour y aller. Molette : zoom · glisser : déplacer · double-clic : recadrer.
+        Cercle vide = dernière position connue (le replay n'a pas la position à cet instant).</div></div>
+  </aside>
+</main>
+<script>
+const D = /*__DONNEES__*/null;
+const $ = (id) => document.getElementById(id);
+$("title").textContent = D.titre;
+
+const players = D.joueurs.map((p) => ({ ...p, on: true }));
+const END = D.fin + 3;
+let t = 0, playing = false, floor = -1;
+
+// ---------------------------------------------------------------- vue (zoom / déplacement)
+const cv = $("map"), ctx = cv.getContext("2d");
+let bbox = (() => {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of players) for (const q of p.points) {
+    x0 = Math.min(x0, q[1]); x1 = Math.max(x1, q[1]); y0 = Math.min(y0, q[2]); y1 = Math.max(y1, q[2]);
+  }
+  return { x0, x1, y0, y1 };
+})();
+let view = null;
+function fit() {
+  const w = cv.clientWidth, h = cv.clientHeight, pad = 30;
+  const s = Math.min((w - 2 * pad) / (bbox.x1 - bbox.x0 || 1), (h - 2 * pad) / (bbox.y1 - bbox.y0 || 1));
+  view = { s, cx: (bbox.x0 + bbox.x1) / 2, cy: (bbox.y0 + bbox.y1) / 2 };
+}
+const sx = (x) => cv.clientWidth / 2 + (x - view.cx) * view.s;
+const sy = (y) => cv.clientHeight / 2 - (y - view.cy) * view.s;
+function resize() {
+  const r = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * r; cv.height = cv.clientHeight * r;
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+  if (!view) fit();
+  ghost = null; draw();
+}
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const k = Math.exp(-e.deltaY * 0.0015), rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const wx = view.cx + (mx - cv.clientWidth / 2) / view.s, wy = view.cy - (my - cv.clientHeight / 2) / view.s;
+  view.s *= k;
+  view.cx = wx - (mx - cv.clientWidth / 2) / view.s; view.cy = wy + (my - cv.clientHeight / 2) / view.s;
+  ghost = null; draw();
+}, { passive: false });
+let drag = null;
+cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  view.cx = drag.cx - (e.clientX - drag.x) / view.s; view.cy = drag.cy + (e.clientY - drag.y) / view.s;
+  ghost = null; draw();
+});
+cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("dblclick", () => { fit(); ghost = null; draw(); });
+
+// ---------------------------------------------------------------- données au temps t
+function inFloor(z) {
+  if (floor < 0) return true;
+  const [lo, hi] = D.etages[floor];
+  return z >= lo && z < hi;
+}
+function floorOf(z) {
+  const i = D.etages.findIndex(([lo, hi]) => z >= lo && z < hi);
+  return i < 0 ? "?" : i;
+}
+function stateAt(p, t) {
+  const pts = p.points;
+  if (!pts.length || t < pts[0][0]) return null;
+  let lo = 0, hi = pts.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (pts[m][0] <= t) lo = m; else hi = m - 1; }
+  const a = pts[lo], b = pts[lo + 1];
+  const dead = p.mort !== null && t >= p.mort;
+  if (dead) return { x: a[1], y: a[2], z: a[3], dead: true, stale: false };
+  if (b && b[0] - a[0] <= 1.0) {
+    const k = (t - a[0]) / (b[0] - a[0]);
+    return { x: a[1] + k * (b[1] - a[1]), y: a[2] + k * (b[2] - a[2]), z: a[3] + k * (b[3] - a[3]), dead: false, stale: false };
+  }
+  return { x: a[1], y: a[2], z: a[3], dead: false, stale: t - a[0] > 1.5 };
+}
+function chronoAt(t) {
+  const c = D.chrono;
+  let lo = 0, hi = c.t.length - 1;
+  if (t < c.t[0]) return { phase: c.phase[0], rem: c.restant[0] / 1000 };
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (c.t[m] <= t) lo = m; else hi = m - 1; }
+  if (t >= D.fin) return { phase: "fin de manche", rem: 0 };
+  return { phase: c.phase[lo], rem: Math.max(0, c.restant[lo] / 1000 - (t - c.t[lo])) };
+}
+const fmt = (s) => { s = Math.ceil(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+// ---------------------------------------------------------------- dessin
+let ghost = null;   // silhouette du bâtiment : tous les points de tous les joueurs
+function drawGhost() {
+  ghost = document.createElement("canvas");
+  ghost.width = cv.width; ghost.height = cv.height;
+  const g = ghost.getContext("2d"), r = window.devicePixelRatio || 1;
+  g.setTransform(r, 0, 0, r, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  g.fillStyle = css.getPropertyValue("--ghost");
+  const sz = Math.max(1.5, view.s * 0.35);
+  for (const p of players) for (const q of p.points) {
+    if (!inFloor(q[3])) continue;
+    g.fillRect(sx(q[1]) - sz / 2, sy(q[2]) - sz / 2, sz, sz);
+  }
+}
+function draw() {
+  if (!view) return;
+  const w = cv.clientWidth, h = cv.clientHeight, css = getComputedStyle(document.documentElement);
+  ctx.clearRect(0, 0, w, h);
+  // grille 10 m
+  ctx.strokeStyle = css.getPropertyValue("--grid"); ctx.lineWidth = 1; ctx.beginPath();
+  const step = 10, gx0 = Math.floor((view.cx - w / 2 / view.s) / step) * step, gy0 = Math.floor((view.cy - h / 2 / view.s) / step) * step;
+  for (let x = gx0; sx(x) < w; x += step) { ctx.moveTo(sx(x), 0); ctx.lineTo(sx(x), h); }
+  for (let y = gy0; sy(y) > 0; y += step) { ctx.moveTo(0, sy(y)); ctx.lineTo(w, sy(y)); }
+  ctx.stroke();
+  if (!ghost) drawGhost();
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(ghost, 0, 0); ctx.restore();
+
+  const trail = +$("trail").value, ink = css.getPropertyValue("--ink"), bg = css.getPropertyValue("--map");
+  // traînées
+  for (const p of players) {
+    if (!p.on) continue;
+    const t0 = t - trail, tEnd = p.mort !== null ? Math.min(t, p.mort) : t;
+    ctx.strokeStyle = p.couleur; ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    let prev = null;
+    for (const q of p.points) {
+      if (q[0] > tEnd) break;
+      if (q[0] < t0) continue;
+      if (prev && q[0] - prev[0] <= 1.0 && inFloor(q[3])) {
+        ctx.globalAlpha = 0.25 + 0.6 * (1 - (t - q[0]) / Math.max(trail, 0.001));
+        ctx.beginPath(); ctx.moveTo(sx(prev[1]), sy(prev[2])); ctx.lineTo(sx(q[1]), sy(q[2])); ctx.stroke();
+      }
+      prev = q;
+    }
+  }
+  ctx.globalAlpha = 1;
+  // joueurs
+  ctx.font = "600 12px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  for (const p of players) {
+    const st = p.on ? stateAt(p, t) : null;
+    p.state = st;
+    if (!st) continue;
+    const X = sx(st.x), Y = sy(st.y), other = !inFloor(st.z);
+    ctx.globalAlpha = other ? 0.3 : 1;
+    if (st.dead) {
+      ctx.strokeStyle = p.couleur; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(X - 6, Y - 6); ctx.lineTo(X + 6, Y + 6); ctx.moveTo(X + 6, Y - 6); ctx.lineTo(X - 6, Y + 6); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(X, Y, 7, 0, 2 * Math.PI);
+      if (st.stale) { ctx.fillStyle = bg; ctx.fill(); ctx.strokeStyle = p.couleur; ctx.lineWidth = 2.5; ctx.stroke(); }
+      else { ctx.fillStyle = p.couleur; ctx.fill(); ctx.strokeStyle = bg; ctx.lineWidth = 2; ctx.stroke(); }
+    }
+    ctx.lineWidth = 3; ctx.strokeStyle = bg; ctx.fillStyle = ink;
+    const label = p.pseudo + (D.etages.length > 1 ? `  niv. ${floorOf(st.z)}` : "");
+    ctx.strokeText(label, X + 11, Y); ctx.fillText(label, X + 11, Y);
+  }
+  ctx.globalAlpha = 1;
+  // en-tête
+  const c = chronoAt(t);
+  $("clock").textContent = fmt(c.rem);
+  $("phase").textContent = c.phase;
+  $("tval").textContent = `t = ${t.toFixed(1)} s`;
+  $("slider").value = t;
+  updatePanels();
+}
+
+// ---------------------------------------------------------------- panneaux
+const plist = $("players");
+for (const p of players) {
+  const el = document.createElement("div");
+  el.className = "player";
+  el.innerHTML = `<span class="dot" style="background:${p.couleur}"></span>
+    <div><div class="pname"></div><div class="psub"></div></div><div class="status"></div>`;
+  el.querySelector(".pname").textContent = p.pseudo;
+  el.querySelector(".psub").textContent = `${p.operateur} · ${p.role}`;
+  el.title = `entité ${p.entite} — clique pour masquer/afficher`;
+  el.onclick = () => { p.on = !p.on; el.classList.toggle("off", !p.on); draw(); };
+  p.el = el; plist.appendChild(el);
+}
+const elist = $("events"), evEls = [];
+for (const e of D.evenements) {
+  const el = document.createElement("div");
+  el.className = "ev";
+  el.innerHTML = `<span class="when"></span><span class="what"></span>`;
+  el.querySelector(".when").textContent = fmt(e.t > 0 ? chronoAt(e.t).rem : 0);
+  el.querySelector(".when").title = `${e.phase} · t = ${e.t} s`;
+  el.querySelector(".what").textContent = e.texte;
+  el.onclick = () => { t = Math.max(0, e.t - 3); draw(); };
+  evEls.push([e, el]); elist.appendChild(el);
+}
+function updatePanels() {
+  for (const p of players) {
+    const s = p.el.querySelector(".status");
+    if (p.mort !== null && t >= p.mort) s.textContent = "✕ mort";
+    else if (!p.state) s.textContent = p.on ? "—" : "";
+    else s.textContent = p.state.stale ? "position inconnue" : "";
+  }
+  for (const [e, el] of evEls) el.classList.toggle("past", e.t <= t);
+}
+
+// étages
+if (D.etages.length > 1) {
+  const box = $("floors");
+  box.append("Niveau ");
+  const names = D.etages.map((f, i) => `${i}`);
+  const mk = (label, i) => {
+    const b = document.createElement("button"); b.textContent = label;
+    if (i >= 0) b.title = `hauteur z ≈ ${D.etages[i][2]} m`;
+    b.onclick = () => { floor = i; [...box.querySelectorAll("button")].forEach((x) => x.classList.remove("on")); b.classList.add("on"); ghost = null; draw(); };
+    if (i === -1) b.classList.add("on");
+    box.appendChild(b);
+  };
+  mk("tous", -1);
+  D.etages.forEach((f, i) => mk(names[i], i));
+}
+
+// frise : kills et phases
+const ticks = $("ticks");
+for (const e of D.evenements) {
+  const d = document.createElement("div");
+  d.className = "tick";
+  d.style.left = `calc(${(100 * e.t) / END}% - 1px)`;
+  const victim = players.find((p) => p.pseudo === e.victime);
+  d.style.background = e.type === "kill" && victim ? victim.couleur : "var(--muted)";
+  ticks.appendChild(d);
+}
+for (const ph of D.phases.slice(1)) {
+  const d = document.createElement("div"); d.className = "phase-mark"; d.style.left = `${(100 * ph.debut) / END}%`; ticks.appendChild(d);
+}
+
+// ---------------------------------------------------------------- lecture
+const slider = $("slider");
+slider.max = END;
+slider.oninput = () => { t = +slider.value; draw(); };
+let lastTs = null;
+function loop(ts) {
+  if (!playing) { lastTs = null; return; }
+  if (lastTs !== null) t = Math.min(END, t + ((ts - lastTs) / 1000) * +$("speed").value);
+  lastTs = ts;
+  if (t >= END) { playing = false; $("play").textContent = "▶ Lire"; }
+  draw();
+  requestAnimationFrame(loop);
+}
+function toggle() {
+  playing = !playing;
+  if (playing && t >= END) t = 0;
+  $("play").textContent = playing ? "❚❚ Pause" : "▶ Lire";
+  if (playing) requestAnimationFrame(loop);
+}
+$("play").onclick = toggle;
+$("trail").onchange = draw;
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && e.target.tagName !== "SELECT") { e.preventDefault(); toggle(); }
+  if (e.code === "ArrowRight") { t = Math.min(END, t + 5); draw(); }
+  if (e.code === "ArrowLeft") { t = Math.max(0, t - 5); draw(); }
+});
+window.addEventListener("resize", resize);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { ghost = null; draw(); });
+resize();
+</script>
+</body>
+</html>

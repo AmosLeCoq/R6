@@ -1,0 +1,5 @@
+# replays et sorties générées
+*.rec
+sortie_*/
+__pycache__/
+*.pyc
