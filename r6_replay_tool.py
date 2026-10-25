@@ -520,11 +520,13 @@ def position_at(track, f, max_gap=200):
 
 
 # ----------------------------------------------------------------------------- qui est qui
-def identify(tracks, players, events, clock, facing=None):
+def identify(tracks, players, events, clock, facing=None, recorder=None):
     """Associe chaque entité à un joueur de l'en-tête.
     1. défense = entités présentes pendant la préparation, attaque = celles qui apparaissent ensuite ;
     2. une victime = la trajectoire qui s'arrête juste après son kill ;
-    3. un survivant = l'entité la plus proche de ses victimes et tournée vers elles au moment des kills,
+    3. le joueur qui a enregistré le replay (s'il survit) = la première entité de son équipe à apparaître :
+       son propre jeu connaît son personnage avant ceux des autres (vérifié sur deux manches) ;
+    4. un autre survivant = l'entité la plus proche de ses victimes et tournée vers elles au moment des kills,
        sinon par élimination ; l'attribution est marquée INCERTAIN quand deux entités sont presque à égalité.
     Renvoie {entité: (joueur, méthode)} et {équipe: 'défense'/'attaque'}."""
     # les attaquants peuvent apparaître dans le flux un peu avant la fin de la préparation : marge de 3 s
@@ -571,6 +573,14 @@ def identify(tracks, players, events, clock, facing=None):
     for team, group in ((defense, early), (attack, late)):
         free = [e for e in group if e not in res]
         survivors = [p for p in mem[team] if p["pseudo"] not in death]
+        rec = next((p for p in survivors if p["pseudo"] == recorder), None)
+        if rec is not None and free:
+            first = sorted(free, key=lambda e: tracks[e][0, 0])
+            gap = (tracks[first[1]][0, 0] - tracks[first[0]][0, 0]) * clock.rate if len(first) > 1 else 1e9
+            if gap >= 0.5:
+                res[first[0]] = (rec, "joueur qui enregistre : premier de son équipe à apparaître")
+                free.remove(first[0])
+                survivors = [p for p in survivors if p is not rec]
         # score d'un survivant pour une entité : proche de ses victimes, et tourné vers elles, au moment des kills
         score = collections.defaultdict(float)
         for k in kills:
@@ -762,7 +772,7 @@ def main():
         sys.exit("Aucune trajectoire de joueur trouvée.")
     print("Extraction des orientations...")
     facing = read_facing(raw, fi, tracks)
-    ident, roles = identify(tracks, players, events, clock, facing)
+    ident, roles = identify(tracks, players, events, clock, facing, rec_player)
     for part in filter(None, (x.strip() for x in a.noms.split(","))):   # corrections manuelles
         if "=" in part:
             k, v = (s.strip() for s in part.split("=", 1))

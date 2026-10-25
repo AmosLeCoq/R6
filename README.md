@@ -33,7 +33,10 @@ Le script déduit qui est qui :
 
 1. la défense est présente pendant la préparation, l'attaque apparaît ensuite ;
 2. une victime, c'est la trajectoire qui s'arrête juste après son kill ;
-3. un survivant, c'est l'entité la plus proche de ses victimes au moment de ses kills, sinon par élimination.
+3. le joueur qui a enregistré le replay, s'il survit, c'est la première entité de son équipe à apparaître :
+   son propre jeu connaît son personnage avant ceux des autres (vérifié sur R02 et R09) ;
+4. un autre survivant, c'est l'entité la plus proche de ses victimes et tournée vers elles au moment de ses
+   kills, sinon par élimination. Quand c'est serré, `resume.txt` l'indique avec « INCERTAIN ».
 
 La méthode utilisée pour chaque joueur est écrite dans `resume.txt`. Si une attribution est fausse :
 
