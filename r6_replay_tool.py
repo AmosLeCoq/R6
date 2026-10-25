@@ -62,7 +62,7 @@ PTR_RX = rb"....[\x00-\xff]\x02\x00\x00"                 # adresse mémoire 64 b
 
 # --- paramètres ---
 MAX_FRAME = 10_000_000  # numéro d'image maximal plausible (≈ 26 h à 100 images/s)
-PAWN_MIN_PTS = 300       # une entité "joueur" a au moins ce nombre de positions dans le canal principal
+PAWN_MIN_PTS = 50        # une entité "joueur" a au moins ce nombre de positions de personnage (sous-type 0xB?)
 OUTLIER_DXY = 2.0        # m : écart max à la médiane des voisins avant de rejeter un point
 OUTLIER_DZ = 2.5
 VIEWER_STEP = 0.1        # s : pas d'échantillonnage des positions dans le lecteur HTML
@@ -312,10 +312,12 @@ def entity_rx(raw):
     return b"(..)" + re.escape(entity_prefix(raw)) + b"\x00\x00\x00\x00"
 
 
-def read_positions(raw, fi):
+def read_positions(raw, fi, n_players=None):
     """Positions de toutes les entités : {entité: [(image, x, y, z, source)]}.
     source 0 = paquet de propriété (canal principal), 1 = canal des positions (entité),
-    2 = canal des positions (adresse mémoire rattachée au joueur)."""
+    2 = canal des positions (adresse mémoire rattachée au joueur).
+    Un joueur = une entité dont les positions sont surtout de sous-type 0xB? (les drones et gadgets
+    utilisent 0xC?/0xE?) ; on garde les n_players entités qui en ont le plus (nombre de joueurs de l'en-tête)."""
     pts = collections.defaultdict(list)
     prop_count = collections.Counter()
     # paquets de propriété : <entité><0><champ> PROP_SIG <sous-type u16> <x y z>
@@ -350,7 +352,11 @@ def read_positions(raw, fi):
         fr = fi.frame(a)
         for e, f, p, k in zip(vals[ok, 0], fr[ok], xyz[ok], ok[ok]):
             pts[int(e)].append((int(f), p[0], p[1], p[2], 1))
-    pawns = [e for e, c in prop_count.items() if c >= PAWN_MIN_PTS]
+    total = {e: sum(1 for q in v if q[4] == 0) for e, v in pts.items()}
+    pawns = sorted((e for e, c in prop_count.items() if c >= PAWN_MIN_PTS and c >= 0.6 * total.get(e, c)),
+                   key=lambda e: -prop_count[e])
+    if n_players:
+        pawns = pawns[:n_players]
     tracks = {e: clean_track(np.array(sorted(pts[e]))) for e in pawns}
     return {e: fill_gaps(t, pointer_tracks(raw, fi)) for e, t in tracks.items()} if tracks else tracks
 
@@ -767,7 +773,7 @@ def main():
         log.append(f"  t={e['t']:6.1f} s  [{e['phase']} {e['chrono']}]  {e['texte']}")
 
     print("Extraction des positions...")
-    tracks = read_positions(raw, fi)
+    tracks = read_positions(raw, fi, len(players) or None)
     if not tracks:
         sys.exit("Aucune trajectoire de joueur trouvée.")
     print("Extraction des orientations...")

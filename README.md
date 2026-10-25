@@ -34,7 +34,7 @@ Le script déduit qui est qui :
 1. la défense est présente pendant la préparation, l'attaque apparaît ensuite ;
 2. une victime, c'est la trajectoire qui s'arrête juste après son kill ;
 3. le joueur qui a enregistré le replay, s'il survit, c'est la première entité de son équipe à apparaître :
-   son propre jeu connaît son personnage avant ceux des autres (vérifié sur R02 et R09) ;
+   son propre jeu connaît son personnage avant ceux des autres (vérifié sur R02, R03 et R09) ;
 4. un autre survivant, c'est l'entité la plus proche de ses victimes et tournée vers elles au moment de ses
    kills, sinon par élimination. Quand c'est serré, `resume.txt` l'indique avec « INCERTAIN ».
 
@@ -79,6 +79,6 @@ Déduit d'un replay de la saison `Y11S3_Alpha04` :
   replay de test). Sinon, seul le lacet est connu.
 - Il n'y a pas de plan de la carte : le lecteur dessine en fond l'ensemble des positions de tous les
   joueurs, ce qui dessine la forme du bâtiment.
-- Testé sur deux manches d'un même match (R02 et R09). Les signatures d'octets peuvent changer d'une saison à l'autre.
+- Testé sur trois manches d'un même match (R02, R03 et R09). Les signatures d'octets peuvent changer d'une saison à l'autre.
 
 Les identifiants de cartes viennent du projet [r6-dissect](https://github.com/redraskal/r6-dissect).
