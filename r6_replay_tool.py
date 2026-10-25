@@ -25,7 +25,8 @@ COMMENT LE FICHIER EST ORGANISÉ (déduit d'un replay Y11S3_Alpha04)
       l'un après l'autre ; chaque canal couvre toute la manche et se découpe en IMAGES (ticks) :
           [u32 numéro d'image][u32 taille][u32 0][données]
       Le numéro d'image est commun à tous les canaux : c'est la base de temps.
-    - Les objets du jeu sont des entités identifiées par un u32 (0xF00Dxxxx pour les joueurs).
+    - Les objets du jeu sont des entités identifiées par un u32 (0xF0??xxxx ; le préfixe des joueurs
+      change d'une manche à l'autre : 0xF00D, 0xF004... il est détecté automatiquement).
       Leurs positions sont des paquets  <entité><0><champ> 60 73 85 FE <sous-type> <x y z float32>
       (canal principal) ou  <entité><0> <x y z float32> <0>  (canal des positions).
     - L'orientation (lacet) est un vecteur unitaire  <entité><0> <x y 0> <0>  du canal des positions ;
@@ -57,7 +58,6 @@ KILLER_TAG = b"\xd9\x13\x3c\xba"           # précédé de 0x22, suivi de <longu
 TARGET_TAG = b"\xac\x19\x0f\x70"
 MESSAGE_TAG = b"\x26\xe3\x09\x00\x79\x00\x00\x00\x00"   # suivi de <longueur u8><texte>
 PROP_SIG = b"\x60\x73\x85\xfe"             # paquet de propriété d'entité (positions dans le canal principal)
-ENTITY_RX = rb"(..)\x0d\xf0\x00\x00\x00\x00"           # identifiant d'entité 0xF00Dxxxx suivi de 4 octets nuls
 PTR_RX = rb"....[\x00-\xff]\x02\x00\x00"                 # adresse mémoire 64 bits 0x0000_02xx_xxxx_xxxx
 
 # --- paramètres ---
@@ -294,6 +294,24 @@ def plausible(x, y, z):
             & ((np.abs(x) > 1.5) | (np.abs(y) > 1.5)))
 
 
+def entity_prefix(raw, _cache={}):
+    """Octets hauts (2 octets) des identifiants d'entité des joueurs, ex. b"\\x0d\\xf0" pour 0xF00Dxxxx.
+    Ils changent d'une manche à l'autre : on prend le préfixe le plus fréquent des paquets de propriété."""
+    if id(raw) not in _cache:
+        c = collections.Counter(raw[m.start() - 10:m.start() - 8] for m in re.finditer(re.escape(PROP_SIG), raw)
+                                if m.start() >= 12 and raw[m.start() - 8:m.start() - 4] == b"\0\0\0\0"
+                                and raw[m.start() - 9] == 0xF0)
+        if not c:
+            sys.exit("Aucun paquet de propriété d'entité : les signatures ne correspondent sans doute pas à ce replay.")
+        _cache[id(raw)] = c.most_common(1)[0][0]
+    return _cache[id(raw)]
+
+
+def entity_rx(raw):
+    """Motif d'un identifiant d'entité joueur suivi de 4 octets nuls."""
+    return b"(..)" + re.escape(entity_prefix(raw)) + b"\x00\x00\x00\x00"
+
+
 def read_positions(raw, fi):
     """Positions de toutes les entités : {entité: [(image, x, y, z, source)]}.
     source 0 = paquet de propriété (canal principal), 1 = canal des positions (entité),
@@ -301,10 +319,10 @@ def read_positions(raw, fi):
     pts = collections.defaultdict(list)
     prop_count = collections.Counter()
     # paquets de propriété : <entité><0><champ> PROP_SIG <sous-type u16> <x y z>
-    offs, ents = [], []
+    offs, prefix = [], entity_prefix(raw)
     for m in re.finditer(re.escape(PROP_SIG), raw):
         o = m.start()
-        if o < 12 or raw[o - 10:o - 4] != b"\x0d\xf0\x00\x00\x00\x00" or o + 18 > len(raw):
+        if o < 12 or raw[o - 10:o - 4] != prefix + b"\0\0\0\0" or o + 18 > len(raw):
             continue
         if raw[o + 4] & 0xF0 not in (0xB0, 0xC0, 0xE0):
             continue
@@ -322,7 +340,7 @@ def read_positions(raw, fi):
                 if s == 0xB0:
                     prop_count[int(e)] += 1
     # canal des positions : <entité><0> <x y z> <u32 0>
-    offs = [m.start() for m in re.finditer(ENTITY_RX, raw, re.S)]
+    offs = [m.start() for m in re.finditer(entity_rx(raw), raw, re.S)]
     offs = [o for o in offs if o + 24 <= len(raw)]
     if offs:
         a = np.array(offs)
@@ -416,7 +434,7 @@ def read_facing(raw, fi, tracks):
       sont réutilisées par d'autres objets.
     Angles en degrés ; lacet = atan2(y, x), dans le repère de la carte. Tangage NaN si inconnu."""
     yaw = collections.defaultdict(list)
-    for m in re.finditer(ENTITY_RX, raw, re.S):
+    for m in re.finditer(entity_rx(raw), raw, re.S):
         o = m.start()
         if o + 24 > len(raw):
             continue
@@ -502,13 +520,15 @@ def position_at(track, f, max_gap=200):
 
 
 # ----------------------------------------------------------------------------- qui est qui
-def identify(tracks, players, events, clock):
+def identify(tracks, players, events, clock, facing=None):
     """Associe chaque entité à un joueur de l'en-tête.
     1. défense = entités présentes pendant la préparation, attaque = celles qui apparaissent ensuite ;
     2. une victime = la trajectoire qui s'arrête juste après son kill ;
-    3. un survivant = l'entité la plus proche de ses victimes au moment des kills, sinon par élimination.
+    3. un survivant = l'entité la plus proche de ses victimes et tournée vers elles au moment des kills,
+       sinon par élimination ; l'attribution est marquée INCERTAIN quand deux entités sont presque à égalité.
     Renvoie {entité: (joueur, méthode)} et {équipe: 'défense'/'attaque'}."""
-    early = [e for e, t in tracks.items() if t[0, 0] < clock.action_frame - 50]
+    # les attaquants peuvent apparaître dans le flux un peu avant la fin de la préparation : marge de 3 s
+    early = [e for e, t in tracks.items() if t[0, 0] < clock.action_frame - 3.0 / clock.rate]
     late = [e for e in tracks if e not in early]
     last = {e: t[-1, 0] for e, t in tracks.items()}
     kills = [e for e in events if e["type"] == "kill"]
@@ -544,30 +564,51 @@ def identify(tracks, players, events, clock):
     _, defense, attack, mem, res = best
     victim_ent = {p["pseudo"]: e for e, (p, _) in res.items()}
 
+    def last_pos(tr, f):
+        a = tr[(tr[:, 0] <= f) & (tr[:, 0] > f - 300)]
+        return a[-1, 1:4] if len(a) else None
+
     for team, group in ((defense, early), (attack, late)):
         free = [e for e in group if e not in res]
         survivors = [p for p in mem[team] if p["pseudo"] not in death]
+        # score d'un survivant pour une entité : proche de ses victimes, et tourné vers elles, au moment des kills
         score = collections.defaultdict(float)
         for k in kills:
             v = victim_ent.get(k["victime"])
-            vpos = position_at(tracks[v], k["frame"]) if v is not None else None
+            vpos = last_pos(tracks[v], k["frame"]) if v is not None else None
             if vpos is None:
                 continue
             for p in survivors:
                 if k["tueur"] != p["pseudo"]:
                     continue
                 for e in free:
-                    q = position_at(tracks[e], k["frame"])
-                    if q is not None:
-                        score[(e, p["pseudo"])] += 1.0 / (1.0 + float(np.linalg.norm(q - vpos)))
-        taken = set()
-        for (e, name), _ in sorted(score.items(), key=lambda kv: -kv[1]):
+                    q = last_pos(tracks[e], k["frame"])
+                    if q is None:
+                        continue
+                    score[(e, p["pseudo"])] += 1.0 / (1.0 + float(np.linalg.norm(q[:2] - vpos[:2])) / 5)
+                    fa = facing.get(e) if facing else None
+                    if fa is not None:
+                        recent = fa[(fa[:, 0] <= k["frame"]) & (fa[:, 0] > k["frame"] - 100)]
+                        if len(recent):
+                            bearing = math.degrees(math.atan2(vpos[1] - q[1], vpos[0] - q[0]))
+                            err = abs((recent[-1, 1] - bearing + 180) % 360 - 180)
+                            score[(e, p["pseudo"])] += max(0.0, math.cos(math.radians(err)))
+        taken, doubtful = set(), False
+        for (e, name), s in sorted(score.items(), key=lambda kv: -kv[1]):
             if e in free and name not in taken:
-                res[e] = (next(p for p in survivors if p["pseudo"] == name), "proximité de ses victimes")
+                others = [s2 for (e2, n2), s2 in score.items() if n2 == name and e2 != e and e2 in free]
+                how = "proximité et visée vers ses victimes"
+                if others and s < 1.5 * max(others):
+                    alt = [e2 for (e2, n2), s2 in score.items() if n2 == name and e2 != e and e2 in free and s2 == max(others)]
+                    how += f" (INCERTAIN : pourrait être {hex(alt[0])})"
+                    doubtful = True
+                res[e] = (next(p for p in survivors if p["pseudo"] == name), how)
                 free.remove(e)
                 taken.add(name)
         rest = [p for p in survivors if p["pseudo"] not in taken]
         how = "élimination" if len(free) == 1 and len(rest) == 1 else "au hasard (à vérifier)"
+        if doubtful and how == "élimination":
+            how += " (INCERTAIN, dépend de l'attribution ci-dessus)"
         for e, p in zip(free, rest):
             res[e] = (p, how)
     return res, {defense: "défense", attack: "attaque"}
@@ -721,7 +762,7 @@ def main():
         sys.exit("Aucune trajectoire de joueur trouvée.")
     print("Extraction des orientations...")
     facing = read_facing(raw, fi, tracks)
-    ident, roles = identify(tracks, players, events, clock)
+    ident, roles = identify(tracks, players, events, clock, facing)
     for part in filter(None, (x.strip() for x in a.noms.split(","))):   # corrections manuelles
         if "=" in part:
             k, v = (s.strip() for s in part.split("=", 1))

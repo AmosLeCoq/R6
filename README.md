@@ -76,6 +76,6 @@ Déduit d'un replay de la saison `Y11S3_Alpha04` :
   replay de test). Sinon, seul le lacet est connu.
 - Il n'y a pas de plan de la carte : le lecteur dessine en fond l'ensemble des positions de tous les
   joueurs, ce qui dessine la forme du bâtiment.
-- Testé sur un seul replay. Les signatures d'octets peuvent changer d'une saison à l'autre.
+- Testé sur deux manches d'un même match (R02 et R09). Les signatures d'octets peuvent changer d'une saison à l'autre.
 
 Les identifiants de cartes viennent du projet [r6-dissect](https://github.com/redraskal/r6-dissect).
