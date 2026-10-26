@@ -124,7 +124,7 @@ def read_header(header):
         if k == "playerid":
             cur = {"id": v}
             players.append(cur)
-        elif k in ("playername", "team", "rolename") and cur is not None:
+        elif k in ("playername", "team", "rolename", "profileid") and cur is not None:
             cur[k] = v
         else:
             cur = None if k in ("version", "datetime") else cur
@@ -134,7 +134,7 @@ def read_header(header):
         if p.get("playername") and p["id"] not in seen:
             seen.add(p["id"])
             out.append({"pseudo": p["playername"], "id": p["id"], "operateur": p.get("rolename", "?"),
-                        "equipe": p.get("team", "?")})
+                        "equipe": p.get("team", "?"), "profil": p.get("profileid", "")})
     return meta, out
 
 
@@ -501,25 +501,6 @@ def read_facing(raw, fi, tracks):
     return out
 
 
-def resample_facing(facing, clock, t_min, t_max):
-    """Orientation pour le lecteur : [t, lacet, tangage|None], une valeur tous les VIEWER_STEP s au plus.
-    Le tangage est reporté depuis le dernier échantillon de caméra (moins de 1 s avant)."""
-    if facing is None or len(facing) == 0:
-        return []
-    t = clock.time(facing[:, 0])
-    out, last, last_pitch = [], -1e9, (None, -1e9)
-    for (f, yw, pt), tt in zip(facing, t):
-        if not t_min - 1 <= tt <= t_max:
-            continue
-        if not math.isnan(pt):
-            last_pitch = (round(float(pt)), tt)
-        if tt - last >= VIEWER_STEP:
-            pitch = last_pitch[0] if tt - last_pitch[1] <= 1.0 else None
-            out.append([round(float(tt), 2), round(float(yw), 1), pitch])
-            last = tt
-    return out
-
-
 def position_at(track, f, max_gap=200):
     i = int(np.argmin(np.abs(track[:, 0] - f)))
     return track[i, 1:4] if abs(track[i, 0] - f) <= max_gap else None
@@ -681,14 +662,13 @@ def render_png(entries, outdir, title):
     plt.tight_layout(); plt.savefig(os.path.join(outdir, "trajectoires.png"), dpi=110, facecolor=bg); plt.close()
 
 
-def resample(track, clock, death_frame):
-    """Positions pour le lecteur : une tous les VIEWER_STEP s au plus, temps en s.
+def resample(t, xyz, t_stop=None):
+    """Positions pour le lecteur : [t, x, y, z], une tous les VIEWER_STEP s au plus.
     Un trou qui commence et finit au même endroit (< 0,75 m) = joueur immobile (le jeu n'envoie rien
     quand rien ne change) : on le remplit avec la même position pour ne pas l'afficher comme inconnu."""
-    t = clock.time(track[:, 0])
     out, last = [], -1e9
-    for (f, x, y, z, _), tt in zip(track, t):
-        if death_frame is not None and f > death_frame + 150:
+    for tt, (x, y, z) in zip(t, xyz):
+        if t_stop is not None and tt > t_stop + 1.5:
             break
         if out and tt - out[-1][0] > 1.0 and math.hypot(x - out[-1][1], y - out[-1][2]) < 0.75 and abs(z - out[-1][3]) < 0.5:
             px, py, pz = out[-1][1:]
@@ -702,60 +682,84 @@ def resample(track, clock, death_frame):
     return out
 
 
-def render_html(entries, events, clock, meta, fl, outdir, title):
+def resample_facing(t, yaw, pitch, t_min, t_max):
+    """Orientation pour le lecteur : [t, lacet, tangage|None], une valeur tous les VIEWER_STEP s au plus.
+    Le tangage est reporté depuis le dernier échantillon de caméra (moins de 1 s avant)."""
+    out, last, last_pitch = [], -1e9, (None, -1e9)
+    for tt, yw, pt in zip(t, yaw, pitch):
+        if not t_min - 1 <= tt <= t_max:
+            continue
+        if pt is not None and not math.isnan(pt):
+            last_pitch = (round(float(pt)), tt)
+        if tt - last >= VIEWER_STEP:
+            p = last_pitch[0] if tt - last_pitch[1] <= 1.0 else None
+            out.append([round(float(tt), 2), round(float(yw), 1), p])
+            last = tt
+    return out
+
+
+def viewer_data(title, joueurs, events, phases, etages, fin, chrono):
+    """Données du lecteur HTML (aussi reconstruites depuis la base par r6_db.py)."""
+    return {
+        "titre": title,
+        "joueurs": [{k: p[k] for k in ("pseudo", "operateur", "role", "couleur", "entite", "mort", "points", "vue")}
+                    for p in joueurs],
+        "evenements": [{k: e[k] for k in ("t", "type", "texte", "phase", "chrono", "tueur", "victime")} for e in events],
+        "phases": phases, "etages": etages, "fin": fin, "chrono": chrono,
+    }
+
+
+def write_viewer(data, path):
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "r6_viewer.html")
     with open(tpl_path, encoding="utf-8") as f:
         tpl = f.read()
-    phases = []
-    for ph in sorted(set(clock.phase.tolist())):
-        fr = clock.frames[clock.phase == ph]
-        phases.append({"nom": clock.phase_name(ph), "debut": round(float(clock.time(fr[0])), 2),
-                       "duree": clock.phase_len[ph]})
-    data = {
-        "titre": title,
-        "joueurs": [{"pseudo": p["pseudo"], "operateur": p["operateur"], "role": p["role"], "couleur": p["couleur"],
-                     "entite": p["entite"], "mort": p["mort"], "points": p["points"], "vue": p["vue"]} for p in entries],
-        "evenements": [{k: e[k] for k in ("t", "type", "texte", "phase", "chrono", "tueur", "victime")} for e in events],
-        "phases": phases,
-        "etages": fl,
-        "fin": round(float(clock.time(clock.end_frame if clock.end_frame else clock.frames[-1])), 2),
-        "chrono": {"t": [round(float(x), 3) for x in clock.t], "restant": [int(v) for v in clock.vals],
-                   "phase": [clock.phase_name(int(p)) for p in clock.phase]},
-    }
-    html = tpl.replace("__TITRE__", title).replace("/*__DONNEES__*/null", json.dumps(data, ensure_ascii=False))
-    with open(os.path.join(outdir, "manche.html"), "w", encoding="utf-8") as f:
+    html = tpl.replace("__TITRE__", data["titre"]).replace("/*__DONNEES__*/null", json.dumps(data, ensure_ascii=False))
+    with open(path, "w", encoding="utf-8") as f:
         f.write(html)
 
 
-# ----------------------------------------------------------------------------- main
-def main():
-    ap = argparse.ArgumentParser(description="Reconstitution d'une manche de R6 Siege à partir d'un replay (.rec)")
-    ap.add_argument("rec")
-    ap.add_argument("-o", "--out", default=None)
-    ap.add_argument("--noms", default="",
-                    help='corrige la correspondance entité -> joueur, ex. "0xf00d20d7=Decoy_99,0xf00d209b=nitramossur1" '
-                         "(les entités sont listées dans resume.txt)")
-    a = ap.parse_args()
+def round_outcome(meta, players, roles, events, clock):
+    """Équipe gagnante ('0'/'1') et condition de victoire, déduites des scores et des événements."""
+    try:
+        s0, s1 = int(meta["startingteamscore0"]), int(meta["startingteamscore1"])
+        e0, e1 = int(meta["teamscore0"]), int(meta["teamscore1"])
+    except (KeyError, ValueError):
+        return None, None
+    winner = "0" if e0 > s0 else "1" if e1 > s1 else None
+    if winner is None:
+        return None, None
+    loser = "1" if winner == "0" else "0"
+    dead = {e["victime"] for e in events if e["type"] == "kill"}
+    planted = any(clock.phase_name(int(p)) == "désamorceur posé" for p in set(clock.phase.tolist()))
+    if all(p["pseudo"] in dead for p in players if p["equipe"] == loser):
+        cond = "élimination"
+    elif planted:
+        cond = "désamorceur explosé" if roles.get(winner) == "attaque" else "désamorceur désactivé"
+    else:
+        cond = "temps écoulé" if roles.get(winner) == "défense" else "objectif"
+    return winner, cond
 
-    name = os.path.splitext(os.path.basename(a.rec))[0]
-    outdir = a.out or f"sortie_{name}"
-    os.makedirs(outdir, exist_ok=True)
+
+# ----------------------------------------------------------------------------- analyse complète
+def analyse(path, noms="", verbose=True):
+    """Analyse un replay et renvoie tout ce qu'il faut pour les fichiers de sortie ou la base de données."""
+    say = print if verbose else (lambda *a, **k: None)
     log = []
-
-    print("Lecture et décompression...")
-    header, raw = read_rec(a.rec)
+    say("Lecture et décompression...")
+    header, raw = read_rec(path)
     meta, players = read_header(header)
     world = int(meta.get("worldid", "0") or 0)
     carte = MAPS.get(world, f"carte inconnue (worldid {world})")
-    title = f"{carte} · manche {int(meta.get('roundnumber', '-1')) + 1 if meta.get('roundnumber', '').isdigit() else '?'}"
-    log.append(f"Replay : {a.rec}  ·  flux décompressé : {len(raw):,} octets")
+    numero = int(meta["roundnumber"]) + 1 if meta.get("roundnumber", "").isdigit() else None
+    title = f"{carte} · manche {numero if numero else '?'}"
+    log.append(f"Replay : {path}  ·  flux décompressé : {len(raw):,} octets")
     log.append(f"Version {meta.get('version', '?')} · {meta.get('datetime', '?')} · {carte} · "
-               f"manche {meta.get('roundnumber', '?')} (numérotée à partir de 0) · "
+               f"manche {numero if numero else '?'} · "
                f"score avant {meta.get('startingteamscore0', '?')}-{meta.get('startingteamscore1', '?')}, "
                f"après {meta.get('teamscore0', '?')}-{meta.get('teamscore1', '?')}")
     rec_player = next((p["pseudo"] for p in players if p["id"] == meta.get("recordingplayerid")), None)
 
-    print("Découpage en images et lecture de l'horloge...")
+    say("Découpage en images et lecture de l'horloge...")
     fi = FrameIndex(raw)
     clock = Clock(raw, fi)
     log.append(f"Images : {len(fi.numbers):,} (numéros {fi.numbers.min()} à {fi.numbers.max()}), "
@@ -772,21 +776,21 @@ def main():
     for e in events:
         log.append(f"  t={e['t']:6.1f} s  [{e['phase']} {e['chrono']}]  {e['texte']}")
 
-    print("Extraction des positions...")
+    say("Extraction des positions...")
     tracks = read_positions(raw, fi, len(players) or None)
     if not tracks:
-        sys.exit("Aucune trajectoire de joueur trouvée.")
-    print("Extraction des orientations...")
+        raise ValueError("Aucune trajectoire de joueur trouvée.")
+    say("Extraction des orientations...")
     facing = read_facing(raw, fi, tracks)
     ident, roles = identify(tracks, players, events, clock, facing, rec_player)
-    for part in filter(None, (x.strip() for x in a.noms.split(","))):   # corrections manuelles
+    for part in filter(None, (x.strip() for x in noms.split(","))):   # corrections manuelles
         if "=" in part:
             k, v = (s.strip() for s in part.split("=", 1))
             try:
                 e = int(k, 16)
             except ValueError:
                 continue
-            p = next((p for p in players if p["pseudo"] == v), {"pseudo": v, "operateur": "?", "equipe": "?"})
+            p = next((p for p in players if p["pseudo"] == v), {"pseudo": v, "operateur": "?", "equipe": "?", "profil": ""})
             for e2, (p2, _) in list(ident.items()):
                 if p2["pseudo"] == v and e2 != e:
                     del ident[e2]
@@ -796,11 +800,12 @@ def main():
     for e in events:
         if e["type"] == "kill":
             death.setdefault(e["victime"], e["frame"])
+    t_end = float(clock.time(clock.end_frame if clock.end_frame else clock.frames[-1]))
     entries, n_def, n_att = [], 0, 0
     order = sorted(tracks, key=lambda e: (roles.get(ident[e][0]["equipe"], "?") if e in ident else "?",
                                           ident[e][0]["pseudo"].lower() if e in ident else hex(e)))
     for e in order:
-        p, how = ident.get(e, ({"pseudo": hex(e), "operateur": "?", "equipe": "?"}, "non identifié"))
+        p, how = ident.get(e, ({"pseudo": hex(e), "operateur": "?", "equipe": "?", "profil": ""}, "non identifié"))
         role = roles.get(p["equipe"], "?")
         if role == "défense":
             col = DEF_COLORS[n_def % len(DEF_COLORS)]; n_def += 1
@@ -812,17 +817,20 @@ def main():
         if df is not None:
             tr = tr[tr[:, 0] <= df + 150]
             fa = fa[fa[:, 0] <= df] if fa is not None else None
-        t_tr = clock.time(tr[[0, -1], 0])
-        entries.append({"pseudo": p["pseudo"], "operateur": p["operateur"], "role": role, "couleur": col,
-                        "entite": hex(e), "methode": how, "track": tr, "facing": fa,
-                        "mort": round(float(clock.time(df)), 2) if df is not None else None,
-                        "points": resample(tr, clock, df),
-                        "vue": resample_facing(fa, clock, float(t_tr[0]), float(t_tr[1]))})
+        t_tr = clock.time(tr[:, 0])
+        t_fa = clock.time(fa[:, 0]) if fa is not None else np.array([])
+        mort = round(float(clock.time(df)), 2) if df is not None else None
+        entries.append({"pseudo": p["pseudo"], "profil": p.get("profil", ""), "equipe": p["equipe"],
+                        "operateur": p["operateur"], "role": role, "couleur": col,
+                        "entite": hex(e), "methode": how, "track": tr, "t_track": t_tr,
+                        "facing": fa, "t_facing": t_fa, "mort": mort,
+                        "points": resample(t_tr, tr[:, 1:4], mort),
+                        "vue": resample_facing(t_fa, fa[:, 1], fa[:, 2], float(t_tr[0]), float(t_tr[-1]))
+                        if fa is not None else []})
 
     log.append(f"Joueurs ({len(entries)} trajectoires) :" + (f"  enregistré par {rec_player}" if rec_player else ""))
-    t_end = float(clock.time(clock.end_frame if clock.end_frame else clock.frames[-1]))
     for p in entries:
-        t = clock.time(p["track"][:, 0])
+        t = p["t_track"]
         t_stop = p["mort"] if p["mort"] is not None else t_end
         tp = np.array([q[0] for q in p["points"] if q[0] < t_stop] + [t_stop])
         span = np.clip(np.diff(tp), 0, None)
@@ -849,6 +857,41 @@ def main():
     fl = floors(np.concatenate([p["track"][:, 3] for p in entries]))
     log.append("Niveaux détectés (hauteur z) : " + ", ".join(
         f"niveau {i} (z ≈ {zt}, de {max(lo, -99):.1f} à {min(hi, 999):.1f})" for i, (lo, hi, zt) in enumerate(fl)))
+    winner, condition = round_outcome(meta, players, roles, events, clock)
+    if winner is not None:
+        log.append(f"Manche gagnée par l'équipe {winner} ({roles.get(winner, '?')}) : {condition}")
+
+    phases = []
+    for ph in sorted(set(clock.phase.tolist())):
+        fr = clock.frames[clock.phase == ph]
+        phases.append({"nom": clock.phase_name(ph), "debut": round(float(clock.time(fr[0])), 2),
+                       "duree": clock.phase_len[ph]})
+    chrono = {"t": [round(float(x), 3) for x in clock.t], "restant": [int(v) for v in clock.vals],
+              "phase": [clock.phase_name(int(p)) for p in clock.phase]}
+    return {"meta": meta, "players": players, "rec_player": rec_player, "carte": carte, "worldid": world,
+            "numero": numero, "title": title, "clock": clock, "events": events, "entries": entries,
+            "roles": roles, "vainqueur": winner, "condition": condition, "etages": fl, "fin": round(t_end, 2),
+            "phases": phases, "chrono": chrono, "log": log}
+
+
+# ----------------------------------------------------------------------------- main
+def main():
+    ap = argparse.ArgumentParser(description="Reconstitution d'une manche de R6 Siege à partir d'un replay (.rec)")
+    ap.add_argument("rec")
+    ap.add_argument("-o", "--out", default=None)
+    ap.add_argument("--noms", default="",
+                    help='corrige la correspondance entité -> joueur, ex. "0xf00d20d7=Decoy_99,0xf00d209b=nitramossur1" '
+                         "(les entités sont listées dans resume.txt)")
+    a = ap.parse_args()
+
+    name = os.path.splitext(os.path.basename(a.rec))[0]
+    outdir = a.out or f"sortie_{name}"
+    os.makedirs(outdir, exist_ok=True)
+    try:
+        R = analyse(a.rec, a.noms)
+    except ValueError as err:
+        sys.exit(str(err))
+    clock, events, entries = R["clock"], R["events"], R["entries"]
 
     with open(os.path.join(outdir, "evenements.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
@@ -862,7 +905,7 @@ def main():
             fa = p["facing"]
             if fa is None:
                 continue
-            for r, t in zip(fa, clock.time(fa[:, 0])):
+            for r, t in zip(fa, p["t_facing"]):
                 cam = not math.isnan(r[2])
                 w.writerow([p["pseudo"], p["entite"], int(r[0]), round(float(t), 2), round(float(r[1]), 1),
                             round(float(r[2]), 1) if cam else "", "caméra" if cam else "corps"])
@@ -870,16 +913,17 @@ def main():
         w = csv.writer(f, delimiter=";")
         w.writerow(["pseudo", "operateur", "role", "entite", "image", "t_replay_s", "x", "y", "z"])
         for p in entries:
-            for r, t in zip(p["track"], clock.time(p["track"][:, 0])):
+            for r, t in zip(p["track"], p["t_track"]):
                 w.writerow([p["pseudo"], p["operateur"], p["role"], p["entite"], int(r[0]), round(float(t), 2),
                             round(r[1], 2), round(r[2], 2), round(r[3], 2)])
 
     print("Rendu...")
-    render_png(entries, outdir, title)
-    render_html(entries, events, clock, meta, fl, outdir, title)
+    render_png(entries, outdir, R["title"])
+    write_viewer(viewer_data(R["title"], entries, events, R["phases"], R["etages"], R["fin"], R["chrono"]),
+                 os.path.join(outdir, "manche.html"))
     with open(os.path.join(outdir, "resume.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(log) + "\n")
-    print("\n".join(log))
+        f.write("\n".join(R["log"]) + "\n")
+    print("\n".join(R["log"]))
     print(f"\nTerminé -> {outdir}/  (ouvre manche.html dans un navigateur)")
 
 

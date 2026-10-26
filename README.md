@@ -10,7 +10,38 @@ python r6_replay_tool.py Match-XXXX-R09.rec
 
 Les replays se trouvent dans le dossier du jeu, sous `MatchReplay/<match>/Match-...-RXX.rec` (un fichier par manche).
 
-## Sorties
+## Base de données (plusieurs parties, statistiques)
+
+`r6_db.py` enregistre les manches dans PostgreSQL, avec la même analyse que `r6_replay_tool.py`.
+
+```
+docker compose up -d                       # PostgreSQL en local (ou une base existante, voir R6_DB)
+python r6_db.py init                       # tables et vues de statistiques
+python r6_db.py import ~/chemin/MatchReplay/   # tous les .rec du dossier, sous-dossiers compris
+python r6_db.py liste                      # manches enregistrées (avec leur numéro)
+python r6_db.py voir 12                    # écrit manche_12.html depuis la base
+python r6_db.py stats                      # bilan par joueur, duels, kills sur coéquipiers
+python r6_db.py stats --joueur nitramossur1    # opérateurs, cartes, victimes, tué par
+python r6_db.py journal 12                 # résumé d'analyse (identification des joueurs)
+```
+
+- Connexion : variable `R6_DB` ou option `--db` (défaut `postgresql://r6:r6@localhost:5432/r6`).
+- Un fichier n'est importé qu'une fois (empreinte SHA-256). Une même manche enregistrée par deux joueurs
+  n'est gardée qu'une fois. `--remplacer` réimporte.
+- Si une attribution est fausse : `python r6_db.py import fichier.rec --noms "0x...=pseudo" --remplacer`.
+- Les joueurs sont identifiés par leur `profileid` Ubisoft : les stats suivent un joueur même s'il change de pseudo.
+- Les kills sur un coéquipier sont enregistrés mais ne comptent ni dans les kills, ni dans les duels.
+
+Tables : `partie`, `manche`, `joueur`, `participation` (un joueur dans une manche : opérateur, rôle, mort,
+kills, distance parcourue), `evenement` (avec la position du tueur et de la victime au moment du kill),
+`position`, `orientation`. Vues : `v_stats_joueur`, `v_stats_operateur`, `v_stats_carte`, `v_duels`,
+`v_kills_allies`, `v_manches`, `v_participation`. Exemple de requête :
+
+```sql
+SELECT pseudo, kd, victoires_pct FROM v_stats_joueur ORDER BY kd DESC;
+```
+
+## Sorties de r6_replay_tool.py
 
 Dans `sortie_<nom du replay>/` (ou le dossier passé avec `-o`) :
 

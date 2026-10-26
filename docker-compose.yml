@@ -1,0 +1,16 @@
+# Base PostgreSQL pour r6_db.py :  docker compose up -d
+# Connexion : postgresql://r6:r6@localhost:5432/r6 (valeur par défaut de r6_db.py)
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: r6
+      POSTGRES_PASSWORD: r6
+      POSTGRES_DB: r6
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - r6_data:/var/lib/postgresql/data
+volumes:
+  r6_data:
