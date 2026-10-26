@@ -15,17 +15,24 @@ Les replays se trouvent dans le dossier du jeu, sous `MatchReplay/<match>/Match-
 `r6_db.py` enregistre les manches dans PostgreSQL, avec la même analyse que `r6_replay_tool.py`.
 
 ```
-docker compose up -d                       # PostgreSQL en local (ou une base existante, voir R6_DB)
-python r6_db.py init                       # tables et vues de statistiques
+sudo apt install postgresql                # ou : docker compose up -d
+sudo -u postgres psql -c "CREATE USER r6 WITH PASSWORD 'r6';" -c "CREATE DATABASE r6 OWNER r6;"
+python r6_db.py init                       # tables et vues (à relancer après une mise à jour du code)
 python r6_db.py import ~/chemin/MatchReplay/   # tous les .rec du dossier, sous-dossiers compris
-python r6_db.py liste                      # manches enregistrées (avec leur numéro)
-python r6_db.py voir 12                    # écrit manche_12.html depuis la base
-python r6_db.py stats                      # bilan par joueur, duels, kills sur coéquipiers
+python r6_db.py parties                    # parties enregistrées, avec leur numéro (1, 2, 3...)
+python r6_db.py liste --partie 2           # manches de la partie 2
+python r6_db.py voir --partie 2            # toutes les manches de la partie 2 : dossier partie_2/ + index.html
+python r6_db.py voir --partie 2 --manche 5 # une seule manche
+python r6_db.py stats                      # bilan par joueur, duels, kills sur coéquipiers (toutes les parties)
+python r6_db.py stats --partie 2           # la même chose pour une seule partie
 python r6_db.py stats --joueur nitramossur1    # opérateurs, cartes, victimes, tué par
-python r6_db.py journal 12                 # résumé d'analyse (identification des joueurs)
+python r6_db.py journal --partie 2 --manche 5  # résumé d'analyse (identification des joueurs)
 ```
 
 - Connexion : variable `R6_DB` ou option `--db` (défaut `postgresql://r6:r6@localhost:5432/r6`).
+- Chaque match est une `partie` distincte (identifiant du match écrit dans les `.rec`), avec un numéro court
+  attribué à l'import. Chaque manche a aussi un `id` unique dans toute la base : `voir 37` marche aussi.
+- Le lecteur HTML est reconstruit entièrement depuis la base : les `.rec` ne sont plus nécessaires après l'import.
 - Un fichier n'est importé qu'une fois (empreinte SHA-256). Une même manche enregistrée par deux joueurs
   n'est gardée qu'une fois. `--remplacer` réimporte.
 - Si une attribution est fausse : `python r6_db.py import fichier.rec --noms "0x...=pseudo" --remplacer`.
@@ -34,11 +41,14 @@ python r6_db.py journal 12                 # résumé d'analyse (identification 
 
 Tables : `partie`, `manche`, `joueur`, `participation` (un joueur dans une manche : opérateur, rôle, mort,
 kills, distance parcourue), `evenement` (avec la position du tueur et de la victime au moment du kill),
-`position`, `orientation`. Vues : `v_stats_joueur`, `v_stats_operateur`, `v_stats_carte`, `v_duels`,
-`v_kills_allies`, `v_manches`, `v_participation`. Exemple de requête :
+`position`, `orientation`. Vues : `v_parties`, `v_manches`, `v_participation`, `v_stats_joueur`,
+`v_stats_operateur`, `v_stats_carte`, `v_duels`, `v_kills_allies`. Les mêmes statistiques existent en
+fonctions avec un numéro de partie (`NULL` = toutes) :
 
 ```sql
 SELECT pseudo, kd, victoires_pct FROM v_stats_joueur ORDER BY kd DESC;
+SELECT * FROM stats_joueur(2);      -- partie 2 seulement
+SELECT * FROM duels(2);
 ```
 
 ## Sorties de r6_replay_tool.py

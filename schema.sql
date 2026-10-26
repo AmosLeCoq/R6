@@ -97,86 +97,146 @@ CREATE INDEX IF NOT EXISTS orientation_manche_profil_t ON orientation (manche_id
 CREATE INDEX IF NOT EXISTS evenement_manche ON evenement (manche_id, t_s);
 CREATE INDEX IF NOT EXISTS participation_profil ON participation (profil);
 
+-- Numéro court de partie (1, 2, 3... dans l'ordre d'import), ajouté aux bases existantes par init
+ALTER TABLE partie ADD COLUMN IF NOT EXISTS num int UNIQUE;
+UPDATE partie SET num = s.n
+FROM (SELECT id, (SELECT coalesce(max(num), 0) FROM partie) + row_number() OVER (ORDER BY date_debut, importe_le) AS n
+      FROM partie WHERE num IS NULL) s
+WHERE partie.id = s.id;
+
 -- ---------------------------------------------------------------------------- vues de statistiques
+-- Recréées à chaque init (les définitions peuvent changer d'une version à l'autre).
+DROP VIEW IF EXISTS v_manches, v_parties, v_kills_allies, v_duels, v_stats_carte, v_stats_operateur,
+                    v_stats_joueur, v_participation CASCADE;
+DROP FUNCTION IF EXISTS stats_joueur(int), stats_operateur(int), stats_carte(int), duels(int), kills_allies(int) CASCADE;
 
 -- Une ligne par joueur et par manche, avec le résultat de la manche de son point de vue
-CREATE OR REPLACE VIEW v_participation AS
+CREATE VIEW v_participation AS
 SELECT pa.*, m.partie_id, m.numero, p.carte, p.date_debut,
        (m.vainqueur = pa.equipe) AS victoire,
        (pa.mort_s IS NULL) AS survie,
        EXISTS (SELECT 1 FROM evenement e WHERE e.manche_id = m.id AND e.type = 'kill' AND NOT e.allie AND e.tueur = pa.profil
                AND e.t_s = (SELECT min(t_s) FROM evenement e2 WHERE e2.manche_id = m.id AND e2.type = 'kill' AND NOT e2.allie)) AS premier_kill,
        EXISTS (SELECT 1 FROM evenement e WHERE e.manche_id = m.id AND e.type = 'kill' AND NOT e.allie AND e.victime = pa.profil
-               AND e.t_s = (SELECT min(t_s) FROM evenement e2 WHERE e2.manche_id = m.id AND e2.type = 'kill' AND NOT e2.allie)) AS premiere_mort
+               AND e.t_s = (SELECT min(t_s) FROM evenement e2 WHERE e2.manche_id = m.id AND e2.type = 'kill' AND NOT e2.allie)) AS premiere_mort,
+       p.num AS partie
 FROM participation pa
 JOIN manche m ON m.id = pa.manche_id
 JOIN partie p ON p.id = m.partie_id;
 
+-- Les fonctions prennent un numéro de partie (NULL = toutes les parties) : SELECT * FROM stats_joueur(2);
+
 -- Bilan par joueur
-CREATE OR REPLACE VIEW v_stats_joueur AS
+CREATE FUNCTION stats_joueur(p_partie int DEFAULT NULL) RETURNS TABLE (
+    profil uuid, pseudo text, manches bigint, parties bigint, kills bigint, morts bigint, kd numeric,
+    kills_par_manche numeric, survie_pct numeric, victoires_pct numeric, premiers_kills bigint,
+    premieres_morts bigint, distance_moy_m numeric) LANGUAGE sql STABLE AS $$
 SELECT j.profil, j.pseudo,
-       count(*)                                                     AS manches,
-       count(DISTINCT v.partie_id)                                  AS parties,
-       sum(v.kills)                                                 AS kills,
-       count(*) FILTER (WHERE NOT v.survie)                         AS morts,
-       round(sum(v.kills)::numeric / GREATEST(count(*) FILTER (WHERE NOT v.survie), 1), 2) AS kd,
-       round(sum(v.kills)::numeric / count(*), 2)                   AS kills_par_manche,
-       round(100.0 * count(*) FILTER (WHERE v.survie) / count(*), 1)    AS survie_pct,
-       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1)  AS victoires_pct,
-       count(*) FILTER (WHERE v.premier_kill)                       AS premiers_kills,
-       count(*) FILTER (WHERE v.premiere_mort)                      AS premieres_morts,
-       round(avg(v.distance_m)::numeric, 0)                         AS distance_moy_m
+       count(*),
+       count(DISTINCT v.partie_id),
+       sum(v.kills),
+       count(*) FILTER (WHERE NOT v.survie),
+       round(sum(v.kills)::numeric / GREATEST(count(*) FILTER (WHERE NOT v.survie), 1), 2),
+       round(sum(v.kills)::numeric / count(*), 2),
+       round(100.0 * count(*) FILTER (WHERE v.survie) / count(*), 1),
+       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1),
+       count(*) FILTER (WHERE v.premier_kill),
+       count(*) FILTER (WHERE v.premiere_mort),
+       round(avg(v.distance_m)::numeric, 0)
 FROM v_participation v
 JOIN joueur j ON j.profil = v.profil
-GROUP BY j.profil, j.pseudo;
+WHERE p_partie IS NULL OR v.partie = p_partie
+GROUP BY j.profil, j.pseudo
+$$;
 
 -- Bilan par joueur, rôle et opérateur
-CREATE OR REPLACE VIEW v_stats_operateur AS
-SELECT j.pseudo, v.role, v.operateur,
-       count(*)                                                     AS manches,
-       sum(v.kills)                                                 AS kills,
-       count(*) FILTER (WHERE NOT v.survie)                         AS morts,
-       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1)  AS victoires_pct
+CREATE FUNCTION stats_operateur(p_partie int DEFAULT NULL) RETURNS TABLE (
+    pseudo text, role text, operateur text, manches bigint, kills bigint, morts bigint, victoires_pct numeric)
+    LANGUAGE sql STABLE AS $$
+SELECT j.pseudo, v.role, v.operateur, count(*), sum(v.kills), count(*) FILTER (WHERE NOT v.survie),
+       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1)
 FROM v_participation v
 JOIN joueur j ON j.profil = v.profil
-GROUP BY j.pseudo, v.role, v.operateur;
-
--- Qui tue qui
-CREATE OR REPLACE VIEW v_duels AS
-SELECT jt.pseudo AS tueur, jv.pseudo AS victime, count(*) AS kills,
-       round(avg(e.distance_m)::numeric, 1) AS distance_moy_m
-FROM evenement e
-JOIN joueur jt ON jt.profil = e.tueur
-JOIN joueur jv ON jv.profil = e.victime
-WHERE e.type = 'kill' AND NOT e.allie
-GROUP BY jt.pseudo, jv.pseudo;
-
--- Kills sur des coéquipiers
-CREATE OR REPLACE VIEW v_kills_allies AS
-SELECT jt.pseudo AS tueur, jv.pseudo AS victime, m.id AS manche_id, e.t_s
-FROM evenement e
-JOIN manche m ON m.id = e.manche_id
-JOIN joueur jt ON jt.profil = e.tueur
-JOIN joueur jv ON jv.profil = e.victime
-WHERE e.type = 'kill' AND e.allie;
+WHERE p_partie IS NULL OR v.partie = p_partie
+GROUP BY j.pseudo, v.role, v.operateur
+$$;
 
 -- Résultats par carte et par rôle, du point de vue de chaque joueur
-CREATE OR REPLACE VIEW v_stats_carte AS
-SELECT j.pseudo, v.carte, v.role,
-       count(*)                                                     AS manches,
-       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1)  AS victoires_pct,
-       round(sum(v.kills)::numeric / count(*), 2)                   AS kills_par_manche
+CREATE FUNCTION stats_carte(p_partie int DEFAULT NULL) RETURNS TABLE (
+    pseudo text, carte text, role text, manches bigint, victoires_pct numeric, kills_par_manche numeric)
+    LANGUAGE sql STABLE AS $$
+SELECT j.pseudo, v.carte, v.role, count(*),
+       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1),
+       round(sum(v.kills)::numeric / count(*), 2)
 FROM v_participation v
 JOIN joueur j ON j.profil = v.profil
-GROUP BY j.pseudo, v.carte, v.role;
+WHERE p_partie IS NULL OR v.partie = p_partie
+GROUP BY j.pseudo, v.carte, v.role
+$$;
+
+-- Qui tue qui (hors coéquipiers)
+CREATE FUNCTION duels(p_partie int DEFAULT NULL) RETURNS TABLE (
+    tueur text, victime text, kills bigint, distance_moy_m numeric) LANGUAGE sql STABLE AS $$
+SELECT jt.pseudo, jv.pseudo, count(*), round(avg(e.distance_m)::numeric, 1)
+FROM evenement e
+JOIN manche m ON m.id = e.manche_id
+JOIN partie p ON p.id = m.partie_id
+JOIN joueur jt ON jt.profil = e.tueur
+JOIN joueur jv ON jv.profil = e.victime
+WHERE e.type = 'kill' AND NOT e.allie AND (p_partie IS NULL OR p.num = p_partie)
+GROUP BY jt.pseudo, jv.pseudo
+$$;
+
+-- Kills sur des coéquipiers
+CREATE FUNCTION kills_allies(p_partie int DEFAULT NULL) RETURNS TABLE (
+    tueur text, victime text, partie int, manche int, manche_id int, t_s real) LANGUAGE sql STABLE AS $$
+SELECT jt.pseudo, jv.pseudo, p.num, m.numero, m.id, e.t_s
+FROM evenement e
+JOIN manche m ON m.id = e.manche_id
+JOIN partie p ON p.id = m.partie_id
+JOIN joueur jt ON jt.profil = e.tueur
+JOIN joueur jv ON jv.profil = e.victime
+WHERE e.type = 'kill' AND e.allie AND (p_partie IS NULL OR p.num = p_partie)
+$$;
+
+CREATE VIEW v_stats_joueur AS SELECT * FROM stats_joueur(NULL);
+CREATE VIEW v_stats_operateur AS SELECT * FROM stats_operateur(NULL);
+CREATE VIEW v_stats_carte AS SELECT * FROM stats_carte(NULL);
+CREATE VIEW v_duels AS SELECT * FROM duels(NULL);
+CREATE VIEW v_kills_allies AS SELECT * FROM kills_allies(NULL);
+
+-- Liste des parties, avec le résultat de l'équipe du joueur qui a enregistré
+CREATE VIEW v_parties AS
+WITH der AS (
+    SELECT DISTINCT ON (m.partie_id) m.partie_id, m.score0_apres, m.score1_apres, m.enregistre_par, m.id
+    FROM manche m ORDER BY m.partie_id, m.numero DESC
+), equipe_rec AS (
+    SELECT der.partie_id, pa.equipe FROM der JOIN participation pa ON pa.manche_id = der.id AND pa.profil = der.enregistre_par
+)
+SELECT p.num AS partie, (SELECT min(date_manche) FROM manche m WHERE m.partie_id = p.id) AS date,
+       p.carte, (SELECT count(*) FROM manche m WHERE m.partie_id = p.id) AS manches_en_base,
+       der.score0_apres || '-' || der.score1_apres AS score,
+       j.pseudo AS enregistre_par,
+       CASE WHEN er.equipe IS NULL THEN NULL
+            WHEN (CASE er.equipe WHEN '0' THEN der.score0_apres - der.score1_apres
+                                 ELSE der.score1_apres - der.score0_apres END) > 0 THEN 'victoire'
+            WHEN der.score0_apres = der.score1_apres THEN 'égalité' ELSE 'défaite' END AS resultat
+FROM partie p
+LEFT JOIN der ON der.partie_id = p.id
+LEFT JOIN equipe_rec er ON er.partie_id = p.id
+LEFT JOIN joueur j ON j.profil = der.enregistre_par
+ORDER BY p.num;
 
 -- Liste des manches
-CREATE OR REPLACE VIEW v_manches AS
-SELECT m.id, m.date_manche, p.carte, m.numero, m.vainqueur, m.condition,
-       m.score0_apres || '-' || m.score1_apres AS score, round(m.duree_s::numeric, 0) AS duree_s,
+CREATE VIEW v_manches AS
+SELECT p.num AS partie, m.numero AS manche, m.id, m.date_manche, p.carte, pa.role AS role_enregistreur,
+       CASE WHEN m.vainqueur IS NULL OR pa.equipe IS NULL THEN NULL
+            WHEN m.vainqueur = pa.equipe THEN 'gagnée' ELSE 'perdue' END AS resultat,
+       m.condition, m.score0_apres || '-' || m.score1_apres AS score, round(m.duree_s::numeric, 0) AS duree_s,
        j.pseudo AS enregistre_par,
        (SELECT count(*) FROM evenement e WHERE e.manche_id = m.id AND e.type = 'kill') AS kills
 FROM manche m
 JOIN partie p ON p.id = m.partie_id
 LEFT JOIN joueur j ON j.profil = m.enregistre_par
-ORDER BY m.date_manche, m.numero;
+LEFT JOIN participation pa ON pa.manche_id = m.id AND pa.profil = m.enregistre_par
+ORDER BY p.num, m.numero;

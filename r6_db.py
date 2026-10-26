@@ -8,9 +8,11 @@ Usage :
     python r6_db.py import MatchReplay/                    importe tous les .rec d'un dossier (récursif)
     python r6_db.py import Match-...-R02.rec Match-...-R03.rec
     python r6_db.py import Match-...-R02.rec --noms "0xf004c777=nitramossur1" --remplacer
-    python r6_db.py liste                                  manches enregistrées
-    python r6_db.py voir 12 -o manche12.html               lecteur HTML d'une manche, depuis la base
-    python r6_db.py stats                                  bilan par joueur
+    python r6_db.py parties                                parties enregistrées, avec leur numéro
+    python r6_db.py liste --partie 2                       manches de la partie 2
+    python r6_db.py voir --partie 2                        lecteurs HTML de toutes les manches + index (dossier partie_2/)
+    python r6_db.py voir --partie 2 --manche 5             lecteur HTML d'une manche, depuis la base
+    python r6_db.py stats [--partie 2]                     bilan par joueur
     python r6_db.py stats --joueur nitramossur1            détail : opérateurs, cartes, duels
 
 Connexion : variable d'environnement R6_DB ou option --db,
@@ -114,8 +116,8 @@ def import_one(db, path, noms="", replace=False):
         return int(v) if v.isdigit() else None
 
     with db.cursor() as cur:
-        cur.execute("""INSERT INTO partie (id, date_debut, carte, worldid, version, mode, type_partie, equipe0_nom, equipe1_nom)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        cur.execute("""INSERT INTO partie (id, date_debut, carte, worldid, version, mode, type_partie, equipe0_nom, equipe1_nom, num)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, (SELECT coalesce(max(num), 0) + 1 FROM partie))
                        ON CONFLICT (id) DO UPDATE SET date_debut = LEAST(partie.date_debut, EXCLUDED.date_debut)""",
                     (partie_id, date, R["carte"], R["worldid"], meta.get("version"), meta.get("gamemodeid"),
                      meta.get("matchtype"), meta.get("teamname0"), meta.get("teamname1")))
@@ -143,6 +145,8 @@ def import_one(db, path, noms="", replace=False):
                      R["fin"], R["title"], json.dumps(R["phases"]), json.dumps(R["chrono"]),
                      json.dumps(R["etages"]), "\n".join(R["log"])))
         mid = cur.fetchone()[0]
+        cur.execute("SELECT num FROM partie WHERE id = %s", (partie_id,))
+        pnum = cur.fetchone()[0]
 
         team = {p["pseudo"]: p["equipe"] for p in R["players"]}
         allie = lambda e: e["type"] == "kill" and team.get(e["tueur"], "?") == team.get(e["victime"], "!")
@@ -188,7 +192,7 @@ def import_one(db, path, noms="", replace=False):
                                   None if math.isnan(r[2]) else float(r[2])))
     db.commit()
     doubt = [p["pseudo"] for p in R["entries"] if "INCERTAIN" in p["methode"] or "hasard" in p["methode"]]
-    msg = f"manche {mid} : {R['title']}, {len(R['entries'])} joueurs, {len(R['events'])} événements"
+    msg = f"partie {pnum}, manche {R['numero']} (id {mid}) : {R['title']}, {len(R['entries'])} joueurs, {len(R['events'])} événements"
     if doubt:
         msg += f"  ⚠ identification incertaine : {', '.join(doubt)} (voir : python r6_db.py journal {mid})"
     return msg
@@ -204,7 +208,7 @@ def cmd_import(db, a):
     for f in files:
         try:
             msg = import_one(db, f, a.noms, a.remplacer)
-            ok += msg.startswith("manche ") and "déjà" not in msg
+            ok += msg.startswith("partie ")
         except (ValueError, SystemExit) as err:
             db.rollback()
             msg = f"ÉCHEC : {err}"
@@ -232,38 +236,64 @@ def print_table(cur, title=None):
         print("  " + "  ".join(v.ljust(w[i]) for i, v in enumerate(r)))
 
 
+def resolve_manche(db, a):
+    """Identifiant de manche à partir de l'id global, ou de --partie N --manche K."""
+    if a.partie is not None and a.manche_num is not None:
+        with db.cursor() as cur:
+            cur.execute("SELECT m.id FROM manche m JOIN partie p ON p.id = m.partie_id WHERE p.num = %s AND m.numero = %s",
+                        (a.partie, a.manche_num))
+            row = cur.fetchone()
+        if not row:
+            sys.exit(f"Pas de manche {a.manche_num} dans la partie {a.partie} (voir : python r6_db.py liste --partie {a.partie}).")
+        return row[0]
+    if a.id is None:
+        sys.exit("Indique une manche : son id (colonne id de « liste ») ou --partie N --manche K.")
+    return a.id
+
+
+def cmd_parties(db, a):
+    with db.cursor() as cur:
+        cur.execute("SELECT * FROM v_parties")
+        print_table(cur)
+
+
 def cmd_liste(db, a):
     with db.cursor() as cur:
-        cur.execute("SELECT * FROM v_manches")
+        if a.partie is None:
+            cur.execute("SELECT * FROM v_manches")
+        else:
+            cur.execute("SELECT * FROM v_manches WHERE partie = %s", (a.partie,))
         print_table(cur)
 
 
 def cmd_journal(db, a):
+    mid = resolve_manche(db, a)
     with db.cursor() as cur:
-        cur.execute("SELECT journal FROM manche WHERE id = %s", (a.manche,))
+        cur.execute("SELECT journal FROM manche WHERE id = %s", (mid,))
         row = cur.fetchone()
     if not row:
-        sys.exit(f"Pas de manche {a.manche}.")
+        sys.exit(f"Pas de manche {mid}.")
     print(row[0])
 
 
-def cmd_voir(db, a):
+def viewer_from_db(db, mid):
+    """Données du lecteur HTML d'une manche, entièrement lues dans la base."""
     with db.cursor() as cur:
-        cur.execute("SELECT titre, phases, horloge, etages, duree_s FROM manche WHERE id = %s", (a.manche,))
+        cur.execute("SELECT titre, phases, horloge, etages, duree_s FROM manche WHERE id = %s", (mid,))
         row = cur.fetchone()
         if not row:
-            sys.exit(f"Pas de manche {a.manche}.")
+            sys.exit(f"Pas de manche {mid}.")
         titre, phases, horloge, etages, fin = row
         cur.execute("""SELECT profil, pseudo, operateur, role, couleur, entite, mort_s FROM participation
-                       WHERE manche_id = %s ORDER BY role, lower(pseudo)""", (a.manche,))
+                       WHERE manche_id = %s ORDER BY role, lower(pseudo)""", (mid,))
         joueurs = []
         for profil, pseudo, op, role, col, ent, mort in cur.fetchall():
             with db.cursor() as c2:
                 c2.execute("SELECT t_s, x, y, z FROM position WHERE manche_id = %s AND profil = %s ORDER BY t_s",
-                           (a.manche, profil))
+                           (mid, profil))
                 pos = np.array(c2.fetchall(), dtype=float).reshape(-1, 4)
                 c2.execute("SELECT t_s, lacet, tangage FROM orientation WHERE manche_id = %s AND profil = %s ORDER BY t_s",
-                           (a.manche, profil))
+                           (mid, profil))
                 ori = c2.fetchall()
             if not len(pos):
                 continue
@@ -276,36 +306,98 @@ def cmd_voir(db, a):
                        FROM evenement e
                        LEFT JOIN participation pt ON pt.manche_id = e.manche_id AND pt.profil = e.tueur
                        LEFT JOIN participation pv ON pv.manche_id = e.manche_id AND pv.profil = e.victime
-                       WHERE e.manche_id = %s ORDER BY e.t_s""", (a.manche,))
+                       WHERE e.manche_id = %s ORDER BY e.t_s""", (mid,))
         events = [dict(zip(("t", "type", "texte", "phase", "chrono", "tueur", "victime"), r)) for r in cur.fetchall()]
-    out = a.out or f"manche_{a.manche}.html"
-    T.write_viewer(T.viewer_data(titre, joueurs, events, phases, etages, fin, horloge), out)
+    return T.viewer_data(titre, joueurs, events, phases, etages, fin, horloge)
+
+
+INDEX_HTML = """<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partie {num}</title>
+<style>
+ :root {{ --bg:#f6f7f9; --panel:#fff; --ink:#1d2129; --muted:#6b7280; --line:#e3e6eb; --ok:#2b8a3e; --ko:#c92a2a; }}
+ @media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{ --bg:#111418; --panel:#1a1e24; --ink:#e8eaed; --muted:#9aa1ab; --line:#2a3038; --ok:#69db7c; --ko:#ff8787; }} }}
+ :root[data-theme="dark"] {{ --bg:#111418; --panel:#1a1e24; --ink:#e8eaed; --muted:#9aa1ab; --line:#2a3038; --ok:#69db7c; --ko:#ff8787; }}
+ body {{ margin:0; padding:20px 16px; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }}
+ main {{ max-width:900px; margin:0 auto; }}
+ h1 {{ font-size:20px; margin:0 0 4px; }} p {{ color:var(--muted); margin:0 0 16px; }}
+ .wrap {{ overflow-x:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; }}
+ table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
+ th, td {{ text-align:left; padding:8px 12px; border-top:1px solid var(--line); white-space:nowrap; }}
+ th {{ border-top:0; color:var(--muted); font-weight:600; font-size:13px; }}
+ a {{ color:inherit; font-weight:600; }} .gagnée {{ color:var(--ok); }} .perdue {{ color:var(--ko); }}
+</style></head><body><main>
+<h1>Partie {num} · {carte}</h1><p>{date} · score final {score} · {resultat}</p>
+<div class="wrap"><table><thead><tr><th>Manche</th><th>Rôle</th><th>Résultat</th><th>Condition</th><th>Score</th><th>Durée</th><th>Kills</th></tr></thead>
+<tbody>{lignes}</tbody></table></div>
+</main></body></html>
+"""
+
+
+def cmd_voir(db, a):
+    import html
+    if a.partie is not None and a.manche_num is None:            # toute la partie : un dossier avec un index
+        with db.cursor() as cur:
+            cur.execute("SELECT partie, date, carte, score, resultat FROM v_parties WHERE partie = %s", (a.partie,))
+            info = cur.fetchone()
+            if not info:
+                sys.exit(f"Pas de partie {a.partie} (voir : python r6_db.py parties).")
+            cur.execute("""SELECT manche, id, role_enregistreur, resultat, condition, score, duree_s, kills
+                           FROM v_manches WHERE partie = %s ORDER BY manche""", (a.partie,))
+            manches = cur.fetchall()
+        outdir = a.out or f"partie_{a.partie}"
+        os.makedirs(outdir, exist_ok=True)
+        lignes = []
+        for num, mid, role, res, cond, score, duree, kills in manches:
+            name = f"manche_{num:02d}.html"
+            T.write_viewer(viewer_from_db(db, mid), os.path.join(outdir, name))
+            e = lambda v: html.escape("" if v is None else str(v))
+            lignes.append(f'<tr><td><a href="{name}">Manche {num}</a></td><td>{e(role)}</td>'
+                          f'<td class="{e(res)}">{e(res)}</td><td>{e(cond)}</td><td>{e(score)}</td>'
+                          f'<td>{int(duree) // 60}:{int(duree) % 60:02d}</td><td>{e(kills)}</td></tr>')
+            print(f"  {name}")
+        num, date, carte, score, resultat = info
+        with open(os.path.join(outdir, "index.html"), "w", encoding="utf-8") as f:
+            f.write(INDEX_HTML.format(num=num, carte=html.escape(carte or "?"),
+                                      date=date.strftime("%d/%m/%Y %H:%M") if date else "?",
+                                      score=html.escape(score or "?"), resultat=html.escape(resultat or "?"),
+                                      lignes="\n".join(lignes)))
+        print(f"Partie {a.partie} : {len(manches)} manche(s) -> {outdir}/index.html")
+        return
+    mid = resolve_manche(db, a)
+    out = a.out or (f"partie_{a.partie}_manche_{a.manche_num}.html" if a.partie is not None else f"manche_{mid}.html")
+    T.write_viewer(viewer_from_db(db, mid), out)
     print(f"Lecteur écrit : {out}")
 
 
 def cmd_stats(db, a):
+    p = a.partie
+    scope = f" (partie {p})" if p is not None else " (toutes les parties)"
     with db.cursor() as cur:
         if not a.joueur:
             cur.execute("SELECT pseudo, manches, parties, kills, morts, kd, kills_par_manche, survie_pct, victoires_pct, "
-                        "premiers_kills, premieres_morts, distance_moy_m FROM v_stats_joueur ORDER BY manches DESC, kd DESC NULLS LAST")
-            print_table(cur, "Bilan par joueur")
-            cur.execute("SELECT tueur, victime, kills, distance_moy_m FROM v_duels ORDER BY kills DESC, tueur LIMIT 15")
+                        "premiers_kills, premieres_morts, distance_moy_m FROM stats_joueur(%s) "
+                        "ORDER BY manches DESC, kd DESC NULLS LAST", (p,))
+            print_table(cur, "Bilan par joueur" + scope)
+            cur.execute("SELECT tueur, victime, kills, distance_moy_m FROM duels(%s) ORDER BY kills DESC, tueur LIMIT 15", (p,))
             print_table(cur, "Duels les plus fréquents")
-            cur.execute("SELECT tueur, victime, manche_id, round(t_s::numeric, 1) AS t_s FROM v_kills_allies ORDER BY manche_id")
+            cur.execute("SELECT tueur, victime, partie, manche, round(t_s::numeric, 1) AS t_s FROM kills_allies(%s) "
+                        "ORDER BY partie, manche", (p,))
             print_table(cur, "Kills sur des coéquipiers (non comptés)")
             return
         like = a.joueur
-        cur.execute("SELECT * FROM v_stats_joueur WHERE pseudo ILIKE %s", (like,))
-        print_table(cur, f"Bilan de {like}")
-        cur.execute("SELECT role, operateur, manches, kills, morts, victoires_pct FROM v_stats_operateur "
-                    "WHERE pseudo ILIKE %s ORDER BY manches DESC, kills DESC", (like,))
+        cur.execute("SELECT * FROM stats_joueur(%s) WHERE pseudo ILIKE %s", (p, like))
+        print_table(cur, f"Bilan de {like}" + scope)
+        cur.execute("SELECT role, operateur, manches, kills, morts, victoires_pct FROM stats_operateur(%s) "
+                    "WHERE pseudo ILIKE %s ORDER BY manches DESC, kills DESC", (p, like))
         print_table(cur, "Par opérateur")
-        cur.execute("SELECT carte, role, manches, victoires_pct, kills_par_manche FROM v_stats_carte "
-                    "WHERE pseudo ILIKE %s ORDER BY carte, role", (like,))
+        cur.execute("SELECT carte, role, manches, victoires_pct, kills_par_manche FROM stats_carte(%s) "
+                    "WHERE pseudo ILIKE %s ORDER BY carte, role", (p, like))
         print_table(cur, "Par carte et par rôle")
-        cur.execute("SELECT victime, kills, distance_moy_m FROM v_duels WHERE tueur ILIKE %s ORDER BY kills DESC", (like,))
+        cur.execute("SELECT victime, kills, distance_moy_m FROM duels(%s) WHERE tueur ILIKE %s ORDER BY kills DESC", (p, like))
         print_table(cur, "Ses victimes")
-        cur.execute("SELECT tueur, kills AS fois, distance_moy_m FROM v_duels WHERE victime ILIKE %s ORDER BY kills DESC", (like,))
+        cur.execute("SELECT tueur, kills AS fois, distance_moy_m FROM duels(%s) WHERE victime ILIKE %s ORDER BY kills DESC",
+                    (p, like))
         print_table(cur, "Tué par")
 
 
@@ -318,18 +410,24 @@ def main():
     p.add_argument("chemins", nargs="+")
     p.add_argument("--remplacer", action="store_true", help="écrase une manche déjà importée")
     p.add_argument("--noms", default="", help='corrige les attributions (un seul fichier), ex. "0xf004c777=nitramossur1"')
-    sub.add_parser("liste", help="manches enregistrées")
-    p = sub.add_parser("voir", help="écrit le lecteur HTML d'une manche")
-    p.add_argument("manche", type=int)
-    p.add_argument("-o", "--out")
-    p = sub.add_parser("journal", help="affiche le résumé d'analyse d'une manche")
-    p.add_argument("manche", type=int)
+    sub.add_parser("parties", help="parties enregistrées (avec leur numéro)")
+    p = sub.add_parser("liste", help="manches enregistrées")
+    p.add_argument("--partie", type=int, help="seulement cette partie")
+    for name, hlp in (("voir", "écrit le lecteur HTML d'une manche, ou de toutes les manches d'une partie"),
+                      ("journal", "affiche le résumé d'analyse d'une manche")):
+        p = sub.add_parser(name, help=hlp)
+        p.add_argument("id", type=int, nargs="?", help="id de la manche (colonne id de « liste »)")
+        p.add_argument("--partie", type=int, help="numéro de partie (voir « parties »)")
+        p.add_argument("--manche", type=int, dest="manche_num", help="numéro de la manche dans la partie")
+        if name == "voir":
+            p.add_argument("-o", "--out", help="fichier (une manche) ou dossier (toute une partie)")
     p = sub.add_parser("stats", help="statistiques")
     p.add_argument("--joueur", help="pseudo (accepte % comme joker)")
+    p.add_argument("--partie", type=int, help="seulement cette partie")
     a = ap.parse_args()
     db = connect(a.db)
     try:
-        {"init": cmd_init, "import": cmd_import, "liste": cmd_liste, "voir": cmd_voir,
+        {"init": cmd_init, "import": cmd_import, "parties": cmd_parties, "liste": cmd_liste, "voir": cmd_voir,
          "journal": cmd_journal, "stats": cmd_stats}[a.cmd](db, a)
     finally:
         db.close()
