@@ -117,6 +117,9 @@ CREATE TABLE IF NOT EXISTS plan_carte (
     PRIMARY KEY (worldid, z)
 );
 
+-- Site de la bombe choisi par la défense (ajouté aux bases existantes ; rempli en relançant import)
+ALTER TABLE manche ADD COLUMN IF NOT EXISTS site text;
+
 -- Numéro court de partie (1, 2, 3... dans l'ordre d'import), ajouté aux bases existantes par init
 ALTER TABLE partie ADD COLUMN IF NOT EXISTS num int UNIQUE;
 UPDATE partie SET num = s.n
@@ -126,9 +129,9 @@ WHERE partie.id = s.id;
 
 -- ---------------------------------------------------------------------------- vues de statistiques
 -- Recréées à chaque init (les définitions peuvent changer d'une version à l'autre).
-DROP VIEW IF EXISTS v_manches, v_parties, v_kills_allies, v_duels, v_stats_carte, v_stats_operateur,
+DROP VIEW IF EXISTS v_stats_site, v_positions, v_manches, v_parties, v_kills_allies, v_duels, v_stats_carte, v_stats_operateur,
                     v_stats_joueur, v_participation CASCADE;
-DROP FUNCTION IF EXISTS stats_joueur(int), stats_operateur(int), stats_carte(int), duels(int), kills_allies(int) CASCADE;
+DROP FUNCTION IF EXISTS stats_site(int), stats_joueur(int), stats_operateur(int), stats_carte(int), duels(int), kills_allies(int) CASCADE;
 
 -- Une ligne par joueur et par manche, avec le résultat de la manche de son point de vue
 CREATE VIEW v_participation AS
@@ -139,7 +142,7 @@ SELECT pa.*, m.partie_id, m.numero, p.carte, p.date_debut,
                AND e.t_s = (SELECT min(t_s) FROM evenement e2 WHERE e2.manche_id = m.id AND e2.type = 'kill' AND NOT e2.allie)) AS premier_kill,
        EXISTS (SELECT 1 FROM evenement e WHERE e.manche_id = m.id AND e.type = 'kill' AND NOT e.allie AND e.victime = pa.profil
                AND e.t_s = (SELECT min(t_s) FROM evenement e2 WHERE e2.manche_id = m.id AND e2.type = 'kill' AND NOT e2.allie)) AS premiere_mort,
-       p.num AS partie
+       p.num AS partie, m.site
 FROM participation pa
 JOIN manche m ON m.id = pa.manche_id
 JOIN partie p ON p.id = m.partie_id;
@@ -219,7 +222,22 @@ JOIN joueur jv ON jv.profil = e.victime
 WHERE e.type = 'kill' AND e.allie AND (p_partie IS NULL OR p.num = p_partie)
 $$;
 
+-- Résultats par site de bombe (carte, site, rôle), du point de vue de chaque joueur
+CREATE FUNCTION stats_site(p_partie int DEFAULT NULL) RETURNS TABLE (
+    pseudo text, carte text, site text, role text, manches bigint, victoires_pct numeric, kills bigint,
+    morts bigint, kills_par_manche numeric) LANGUAGE sql STABLE AS $$
+SELECT j.pseudo, v.carte, coalesce(v.site, '?'), v.role, count(*),
+       round(100.0 * count(*) FILTER (WHERE v.victoire) / count(*), 1),
+       sum(v.kills), count(*) FILTER (WHERE NOT v.survie),
+       round(sum(v.kills)::numeric / count(*), 2)
+FROM v_participation v
+JOIN joueur j ON j.profil = v.profil
+WHERE p_partie IS NULL OR v.partie = p_partie
+GROUP BY j.pseudo, v.carte, coalesce(v.site, '?'), v.role
+$$;
+
 CREATE VIEW v_stats_joueur AS SELECT * FROM stats_joueur(NULL);
+CREATE VIEW v_stats_site AS SELECT * FROM stats_site(NULL);
 CREATE VIEW v_stats_operateur AS SELECT * FROM stats_operateur(NULL);
 CREATE VIEW v_stats_carte AS SELECT * FROM stats_carte(NULL);
 CREATE VIEW v_duels AS SELECT * FROM duels(NULL);
@@ -249,7 +267,7 @@ ORDER BY p.num;
 
 -- Liste des manches
 CREATE VIEW v_manches AS
-SELECT p.num AS partie, m.numero AS manche, m.id, m.date_manche, p.carte, pa.role AS role_enregistreur,
+SELECT p.num AS partie, m.numero AS manche, m.id, m.date_manche, p.carte, m.site, pa.role AS role_enregistreur,
        CASE WHEN m.vainqueur IS NULL OR pa.equipe IS NULL THEN NULL
             WHEN m.vainqueur = pa.equipe THEN 'gagnée' ELSE 'perdue' END AS resultat,
        m.condition, m.score0_apres || '-' || m.score1_apres AS score, round(m.duree_s::numeric, 0) AS duree_s,
@@ -260,3 +278,15 @@ JOIN partie p ON p.id = m.partie_id
 LEFT JOIN joueur j ON j.profil = m.enregistre_par
 LEFT JOIN participation pa ON pa.manche_id = m.id AND pa.profil = m.enregistre_par
 ORDER BY p.num, m.numero;
+
+-- Positions avec le contexte (joueur, carte, rôle...) et le temps compté depuis le début de l'action
+-- (négatif pendant la préparation), pour comparer les manches entre elles :
+--   SELECT * FROM v_positions WHERE pseudo = 'nitramossur1' AND carte = 'Littoral' AND role = 'attaque' AND t_action < 30;
+CREATE VIEW v_positions AS
+SELECT pr.num AS partie, m.numero AS manche, m.id AS manche_id, pr.carte, pa.pseudo, pa.profil, pa.role, pa.operateur,
+       (m.vainqueur = pa.equipe) AS victoire, m.site,
+       po.t_s, po.t_s - coalesce((m.phases -> 1 ->> 'debut')::real, 0) AS t_action, po.x, po.y, po.z
+FROM position po
+JOIN participation pa ON pa.manche_id = po.manche_id AND pa.profil = po.profil
+JOIN manche m ON m.id = po.manche_id
+JOIN partie pr ON pr.id = m.partie_id;

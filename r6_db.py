@@ -14,6 +14,8 @@ Usage :
     python r6_db.py voir --partie 2 --manche 5             lecteur HTML d'une manche, depuis la base
     python r6_db.py stats [--partie 2]                     bilan par joueur
     python r6_db.py stats --joueur nitramossur1            détail : opérateurs, cartes, duels
+    python r6_db.py trajets --joueur nitramossur1 --carte Littoral --role attaque --dernieres 20
+                                                           trajets superposés (page HTML)
     python r6_db.py carte 436375283234 "Nom de la carte"   nomme une carte inconnue
     python r6_db.py plan --worldid ... --z 2.9 --image plan.png --calage "cx,cy,mpp,rot"
                                                            plan d'un niveau, calé dans le lecteur
@@ -23,7 +25,7 @@ par défaut postgresql://r6:r6@localhost:5432/r6
 
 Dépendances :  pip install -r requirements.txt   (psycopg en plus de celles de r6_replay_tool.py)
 """
-import argparse, base64, datetime, hashlib, json, math, mimetypes, os, sys, uuid
+import argparse, base64, collections, datetime, hashlib, json, math, mimetypes, os, sys, uuid
 
 try:
     import psycopg
@@ -51,6 +53,17 @@ def cmd_init(db, a):
         sql = f.read()
     with db.cursor() as cur:
         cur.execute(sql)
+        # cartes reconnues depuis l'import (nouvel identifiant ajouté à r6_replay_tool.MAPS)
+        cur.execute("SELECT DISTINCT worldid FROM partie WHERE carte LIKE 'carte inconnue%%'")
+        for (w,) in cur.fetchall():
+            cur.execute("SELECT nom FROM carte WHERE worldid = %s", (w,))
+            row = cur.fetchone()
+            nom = row[0] if row else T.MAPS.get(w)
+            if nom:
+                cur.execute("UPDATE partie SET carte = %s WHERE worldid = %s", (nom, w))
+                cur.execute("""UPDATE manche m SET titre = %s || ' · manche ' || m.numero || coalesce(' · ' || m.site, '')
+                               FROM partie p WHERE p.id = m.partie_id AND p.worldid = %s""", (nom, w))
+                print(f"Carte {w} : {nom}")
     db.commit()
     print("Base prête (tables et vues créées).")
 
@@ -93,9 +106,16 @@ def import_one(db, path, noms="", replace=False):
     with open(path, "rb") as f:
         sha = hashlib.sha256(f.read()).hexdigest()
     with db.cursor() as cur:
-        cur.execute("SELECT id FROM manche WHERE sha256 = %s", (sha,))
+        cur.execute("SELECT id, site FROM manche WHERE sha256 = %s", (sha,))
         row = cur.fetchone()
         if row and not replace:
+            if row[1] is None:                       # importé avant la lecture du site : on ne complète que lui
+                _, raw = T.read_rec(path)
+                site = T.read_site(raw)
+                if site:
+                    cur.execute("UPDATE manche SET site = %s, titre = titre || ' · ' || %s WHERE id = %s", (site, site, row[0]))
+                    db.commit()
+                    return f"déjà importé (manche {row[0]}), site ajouté : {site}"
             return f"déjà importé (manche {row[0]})"
     R = T.analyse(path, noms, verbose=False)
     meta = R["meta"]
@@ -104,7 +124,7 @@ def import_one(db, path, noms="", replace=False):
         row = cur.fetchone()
     if row:
         R["carte"] = row[0]
-        R["title"] = f"{row[0]} · manche {R['numero'] if R['numero'] else '?'}"
+        R["title"] = f"{row[0]} · manche {R['numero'] if R['numero'] else '?'}" + (f" · {R['site']}" if R["site"] else "")
     try:
         partie_id = uuid.UUID(meta["id"])
     except (KeyError, ValueError):
@@ -147,12 +167,12 @@ def import_one(db, path, noms="", replace=False):
             cur.execute("DELETE FROM manche WHERE id = %s", (old[0],))
         cur.execute("""INSERT INTO manche (partie_id, numero, date_manche, fichier, sha256, enregistre_par, equipe_attaque,
                          vainqueur, condition, score0_avant, score1_avant, score0_apres, score1_apres, duree_s, titre,
-                         phases, horloge, etages, journal)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                         phases, horloge, etages, journal, site)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                     (partie_id, R["numero"], date, os.path.basename(path), sha, rec, attaque, R["vainqueur"], R["condition"],
                      num("startingteamscore0"), num("startingteamscore1"), num("teamscore0"), num("teamscore1"),
                      R["fin"], R["title"], json.dumps(R["phases"]), json.dumps(R["chrono"]),
-                     json.dumps(R["etages"]), "\n".join(R["log"])))
+                     json.dumps(R["etages"]), "\n".join(R["log"]), R["site"]))
         mid = cur.fetchone()[0]
         cur.execute("SELECT num FROM partie WHERE id = %s", (partie_id,))
         pnum = cur.fetchone()[0]
@@ -343,7 +363,7 @@ INDEX_HTML = """<!doctype html>
  a {{ color:inherit; font-weight:600; }} .gagnée {{ color:var(--ok); }} .perdue {{ color:var(--ko); }}
 </style></head><body><main>
 <h1>Partie {num} · {carte}</h1><p>{date} · score final {score} · {resultat}</p>
-<div class="wrap"><table><thead><tr><th>Manche</th><th>Rôle</th><th>Résultat</th><th>Condition</th><th>Score</th><th>Durée</th><th>Kills</th></tr></thead>
+<div class="wrap"><table><thead><tr><th>Manche</th><th>Site</th><th>Rôle</th><th>Résultat</th><th>Condition</th><th>Score</th><th>Durée</th><th>Kills</th></tr></thead>
 <tbody>{lignes}</tbody></table></div>
 </main></body></html>
 """
@@ -357,17 +377,17 @@ def cmd_voir(db, a):
             info = cur.fetchone()
             if not info:
                 sys.exit(f"Pas de partie {a.partie} (voir : python r6_db.py parties).")
-            cur.execute("""SELECT manche, id, role_enregistreur, resultat, condition, score, duree_s, kills
+            cur.execute("""SELECT manche, id, site, role_enregistreur, resultat, condition, score, duree_s, kills
                            FROM v_manches WHERE partie = %s ORDER BY manche""", (a.partie,))
             manches = cur.fetchall()
         outdir = a.out or f"partie_{a.partie}"
         os.makedirs(outdir, exist_ok=True)
         lignes = []
-        for num, mid, role, res, cond, score, duree, kills in manches:
+        for num, mid, site, role, res, cond, score, duree, kills in manches:
             name = f"manche_{num:02d}.html"
             T.write_viewer(viewer_from_db(db, mid), os.path.join(outdir, name))
             e = lambda v: html.escape("" if v is None else str(v))
-            lignes.append(f'<tr><td><a href="{name}">Manche {num}</a></td><td>{e(role)}</td>'
+            lignes.append(f'<tr><td><a href="{name}">Manche {num}</a></td><td>{e(site)}</td><td>{e(role)}</td>'
                           f'<td class="{e(res)}">{e(res)}</td><td>{e(cond)}</td><td>{e(score)}</td>'
                           f'<td>{int(duree) // 60}:{int(duree) % 60:02d}</td><td>{e(kills)}</td></tr>')
             print(f"  {name}")
@@ -409,11 +429,123 @@ def cmd_stats(db, a):
         cur.execute("SELECT carte, role, manches, victoires_pct, kills_par_manche FROM stats_carte(%s) "
                     "WHERE pseudo ILIKE %s ORDER BY carte, role", (p, like))
         print_table(cur, "Par carte et par rôle")
+        cur.execute("SELECT carte, site, role, manches, victoires_pct, kills, morts FROM stats_site(%s) "
+                    "WHERE pseudo ILIKE %s ORDER BY carte, site, role", (p, like))
+        print_table(cur, "Par site de bombe")
         cur.execute("SELECT victime, kills, distance_moy_m FROM duels(%s) WHERE tueur ILIKE %s ORDER BY kills DESC", (p, like))
         print_table(cur, "Ses victimes")
         cur.execute("SELECT tueur, kills AS fois, distance_moy_m FROM duels(%s) WHERE victime ILIKE %s ORDER BY kills DESC",
                     (p, like))
         print_table(cur, "Tué par")
+
+
+ROUND_COLORS = ["#1F77B4", "#D62728", "#2CA02C", "#FF7F0E", "#9467BD", "#17BECF", "#E377C2", "#8C564B",
+                "#BCBD22", "#4C6EF5", "#F76707", "#0B7285"]
+
+
+def cmd_trajets(db, a):
+    """Page HTML : trajets superposés d'un joueur, filtrés par carte, rôle, parties."""
+    cond, args = ["pa.pseudo ILIKE %s"], [a.joueur]
+    if a.carte:
+        cond.append("pr.carte ILIKE %s"); args.append(a.carte)
+    if a.role:
+        role = {"att": "attaque", "attaque": "attaque", "def": "défense", "defense": "défense", "défense": "défense"}.get(a.role.lower())
+        if not role:
+            sys.exit("--role : attaque ou défense")
+        cond.append("pa.role = %s"); args.append(role)
+    if a.partie is not None:
+        cond.append("pr.num = %s"); args.append(a.partie)
+    if a.site:
+        cond.append("m.site ILIKE %s"); args.append(f"%{a.site}%")
+    where = " AND ".join(cond)
+    with db.cursor() as cur:
+        cur.execute(f"""SELECT DISTINCT pr.worldid, pr.carte FROM participation pa JOIN manche m ON m.id = pa.manche_id
+                        JOIN partie pr ON pr.id = m.partie_id WHERE {where}""", args)
+        maps = cur.fetchall()
+        if not maps:
+            sys.exit("Aucune manche ne correspond (vérifie le pseudo, la carte et le rôle ; « carte » liste les cartes).")
+        if len(maps) > 1:
+            sys.exit("Plusieurs cartes correspondent, précise --carte : " + ", ".join(f"« {c} »" for _, c in maps))
+        worldid, carte = maps[0]
+        if a.dernieres:
+            # les N dernières parties de ce joueur sur cette carte (dans le rôle demandé)
+            cur.execute(f"""SELECT pr.num FROM participation pa JOIN manche m ON m.id = pa.manche_id
+                            JOIN partie pr ON pr.id = m.partie_id WHERE {where}
+                            GROUP BY pr.num ORDER BY max(m.date_manche) DESC NULLS LAST, pr.num DESC LIMIT %s""",
+                        args + [a.dernieres])
+            nums = [r[0] for r in cur.fetchall()]
+            where += " AND pr.num = ANY(%s)"; args.append(nums)
+        cur.execute(f"""SELECT m.id, pr.num, m.numero, pa.operateur, pa.role, pa.profil, pa.pseudo, pa.equipe, m.vainqueur,
+                               coalesce((m.phases -> 1 ->> 'debut')::real, 0) AS debut_action, m.site
+                        FROM participation pa JOIN manche m ON m.id = pa.manche_id JOIN partie pr ON pr.id = m.partie_id
+                        WHERE {where} ORDER BY m.date_manche, pr.num, m.numero""", args)
+        rows = cur.fetchall()
+        cur.execute("SELECT z, image, mime, fichier, cx, cy, mpp, rot, opacite FROM plan_carte WHERE worldid = %s", (worldid,))
+        plans = [{"z": z, "image": f"data:{mime};base64," + base64.b64encode(img).decode(), "fichier": f,
+                  "cx": cx, "cy": cy, "mpp": mpp, "rot": rot, "op": op} for z, img, mime, f, cx, cy, mpp, rot, op in cur.fetchall()]
+        manches, zs = [], []
+        many = len(rows) > len(ROUND_COLORS)
+        for i, (mid, pnum, num, op, role, profil, pseudo, equipe, vainqueur, t0, site) in enumerate(rows):
+            cur.execute("SELECT t_s, x, y, z FROM position WHERE manche_id = %s AND profil = %s ORDER BY t_s", (mid, profil))
+            pos = np.array(cur.fetchall(), dtype=float).reshape(-1, 4)
+            if not len(pos):
+                continue
+            cur.execute("""SELECT e.t_s, e.tueur_x, e.tueur_y, e.tueur_z, e.victime_x, e.victime_y, e.victime_z, j.pseudo
+                           FROM evenement e LEFT JOIN joueur j ON j.profil = e.victime
+                           WHERE e.manche_id = %s AND e.tueur = %s AND e.type = 'kill' AND NOT e.allie ORDER BY e.t_s""",
+                        (mid, profil))
+            kills = [{"t": round(t - t0, 2), "x": x, "y": y, "z": z, "vx": vx, "vy": vy, "vz": vz, "victime": v}
+                     for t, x, y, z, vx, vy, vz, v in cur.fetchall()]
+            cur.execute("""SELECT e.t_s, e.victime_x, e.victime_y, e.victime_z, j.pseudo
+                           FROM evenement e LEFT JOIN joueur j ON j.profil = e.tueur
+                           WHERE e.manche_id = %s AND e.victime = %s AND e.type = 'kill' ORDER BY e.t_s LIMIT 1""", (mid, profil))
+            d = cur.fetchone()
+            mort = {"t": round(d[0] - t0, 2), "x": d[1], "y": d[2], "z": d[3], "tueur": d[4]} if d else None
+            if mort and mort["x"] is None:
+                mort.update(x=float(pos[-1, 1]), y=float(pos[-1, 2]), z=float(pos[-1, 3]))
+            pts = T.resample(pos[:, 0] - t0, pos[:, 1:4], mort["t"] if mort else None)
+            manches.append({"partie": pnum, "manche": num, "operateur": op, "role": role, "site": site,
+                            "victoire": None if vainqueur is None else vainqueur == equipe,
+                            "couleur": "#4C6EF5" if many else ROUND_COLORS[i % len(ROUND_COLORS)],
+                            "points": pts, "kills": kills, "mort": mort})
+    if not manches:
+        sys.exit("Aucune position pour ces manches.")
+    with db.cursor() as cur:                      # niveaux calculés sur toute la carte (stables d'une page à l'autre)
+        cur.execute("""SELECT po.z FROM position po TABLESAMPLE SYSTEM (20) JOIN manche m ON m.id = po.manche_id
+                       JOIN partie pr ON pr.id = m.partie_id WHERE pr.worldid = %s LIMIT 300000""", (worldid,))
+        zs = [r[0] for r in cur.fetchall()]
+        if len(zs) < 1000:
+            cur.execute("""SELECT po.z FROM position po JOIN manche m ON m.id = po.manche_id
+                           JOIN partie pr ON pr.id = m.partie_id WHERE pr.worldid = %s LIMIT 300000""", (worldid,))
+            zs = [r[0] for r in cur.fetchall()]
+    if many:
+        for m in manches:
+            m["couleur"] = "#4C6EF5"
+    nom = rows[0][6]
+    roles = sorted({m["role"] for m in manches})
+    parties = sorted({m["partie"] for m in manches})
+    gagnees = sum(1 for m in manches if m["victoire"])
+    data = {"titre": f"{nom} · {carte}" + (f" · {roles[0]}" if len(roles) == 1 else "")
+                     + (f" · site « {a.site} »" if a.site else ""),
+            "sous_titre": f"{len(manches)} manche(s) sur {len(parties)} partie(s)"
+                          + (f" (les {a.dernieres} dernières)" if a.dernieres else "")
+                          + (" · sites : " + ", ".join(f"{st} ×{n}" for st, n in collections.Counter(
+                              m["site"] or "?" for m in manches).most_common()))
+                          + f" · {gagnees} gagnée(s) · opérateurs : "
+                          + ", ".join(f"{o} ×{n}" for o, n in sorted(
+                              {o: sum(1 for m in manches if m['operateur'] == o) for o in {m['operateur'] for m in manches}}.items(),
+                              key=lambda kv: -kv[1])),
+            "manches": manches, "plans": plans, "etages": T.floors(zs), "densite": many}
+    tpl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "r6_trajets.html")
+    with open(tpl, encoding="utf-8") as f:
+        html = f.read().replace("__TITRE__", data["titre"]).replace("/*__DONNEES__*/null", json.dumps(data, ensure_ascii=False))
+    out = a.out or "trajets_{}_{}{}{}.html".format(
+        "".join(c for c in nom if c.isalnum() or c in "-_"), "".join(c for c in carte if c.isalnum()) or "carte",
+        f"_{roles[0]}" if len(roles) == 1 else "",
+        "_" + "".join(c for c in a.site if c.isalnum()) if a.site else "")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"{len(manches)} manche(s), {len(parties)} partie(s) -> {out}")
 
 
 def cmd_carte(db, a):
@@ -429,7 +561,7 @@ def cmd_carte(db, a):
         cur.execute("INSERT INTO carte (worldid, nom) VALUES (%s, %s) ON CONFLICT (worldid) DO UPDATE SET nom = EXCLUDED.nom",
                     (a.worldid, a.nom))
         cur.execute("UPDATE partie SET carte = %s WHERE worldid = %s", (a.nom, a.worldid))
-        cur.execute("""UPDATE manche m SET titre = %s || ' · manche ' || m.numero
+        cur.execute("""UPDATE manche m SET titre = %s || ' · manche ' || m.numero || coalesce(' · ' || m.site, '')
                        FROM partie p WHERE p.id = m.partie_id AND p.worldid = %s""", (a.nom, a.worldid))
         n = cur.rowcount
     db.commit()
@@ -502,6 +634,14 @@ def main():
         p.add_argument("--manche", type=int, dest="manche_num", help="numéro de la manche dans la partie")
         if name == "voir":
             p.add_argument("-o", "--out", help="fichier (une manche) ou dossier (toute une partie)")
+    p = sub.add_parser("trajets", help="trajets superposés d'un joueur sur une carte (page HTML)")
+    p.add_argument("--joueur", required=True, help="pseudo (accepte % comme joker)")
+    p.add_argument("--carte", help="nom de la carte, ex. Littoral")
+    p.add_argument("--role", help="attaque ou défense")
+    p.add_argument("--dernieres", type=int, help="seulement les N dernières parties sur cette carte")
+    p.add_argument("--site", help="site de la bombe (morceau du nom suffit, ex. narguilé)")
+    p.add_argument("--partie", type=int, help="seulement cette partie")
+    p.add_argument("-o", "--out")
     p = sub.add_parser("carte", help="liste les cartes, ou donne un nom à une carte inconnue")
     p.add_argument("worldid", type=int, nargs="?")
     p.add_argument("nom", nargs="?")
@@ -520,7 +660,8 @@ def main():
     db = connect(a.db)
     try:
         {"init": cmd_init, "import": cmd_import, "parties": cmd_parties, "liste": cmd_liste, "voir": cmd_voir,
-         "journal": cmd_journal, "stats": cmd_stats, "carte": cmd_carte, "plan": cmd_plan}[a.cmd](db, a)
+         "journal": cmd_journal, "stats": cmd_stats, "carte": cmd_carte, "plan": cmd_plan,
+         "trajets": cmd_trajets}[a.cmd](db, a)
     finally:
         db.close()
 

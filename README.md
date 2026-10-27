@@ -29,6 +29,26 @@ python r6_db.py stats --joueur nitramossur1    # opérateurs, cartes, victimes, 
 python r6_db.py journal --partie 2 --manche 5  # résumé d'analyse (identification des joueurs)
 ```
 
+### Trajets d'un joueur (plusieurs manches et parties superposées)
+
+```
+python r6_db.py trajets --joueur nitramossur1 --carte Littoral --role attaque
+python r6_db.py trajets --joueur nitramossur1 --carte Littoral --role attaque --dernieres 20
+python r6_db.py trajets --joueur nitramossur1 --carte Littoral --site narguilé
+```
+
+La page superpose les trajets de toutes les manches qui correspondent, alignés sur le début de l'action
+(le temps négatif est la préparation) : fenêtre de temps réglable (« que fait-il dans les 30 premières
+secondes ? »), carte de chaleur du temps passé, kills (étoile, avec un trait vers la victime) et morts (croix),
+temps passé par niveau, et une liste des manches à cocher. Au-delà de 12 manches, les trajets passent en
+mode densité (une couleur, semi-transparente) pour faire ressortir les chemins habituels.
+
+- `--dernieres N` : les N dernières parties de ce joueur sur cette carte (dans le rôle demandé).
+- `--site` : site de la bombe ; un morceau du nom suffit (« narguilé », « cuisine »). Les noms sont ceux du
+  jeu, dans sa langue. `python r6_db.py liste` affiche le site de chaque manche.
+- Pour faire ses propres requêtes : la vue `v_positions` donne chaque position avec la partie, la manche,
+  la carte, le site, le joueur, le rôle, l'opérateur et `t_action` (secondes depuis le début de l'action).
+
 ### Plan de la carte
 
 Le lecteur peut afficher une image de la carte sous les joueurs (une image par niveau). Le script ne fournit
@@ -53,6 +73,8 @@ python r6_db.py plan --worldid 436375283234 --z 2.9 --supprimer
 - Connexion : variable `R6_DB` ou option `--db` (défaut `postgresql://r6:r6@localhost:5432/r6`).
 - Chaque match est une `partie` distincte (identifiant du match écrit dans les `.rec`), avec un numéro court
   attribué à l'import. Chaque manche a aussi un `id` unique dans toute la base : `voir 37` marche aussi.
+- Le site de la bombe est lu dans le replay. Pour les manches importées avant cette fonction, relancer
+  `import` sur les mêmes fichiers ajoute seulement le site (rapide, corrections `--noms` conservées).
 - Le lecteur HTML est reconstruit entièrement depuis la base : les `.rec` ne sont plus nécessaires après l'import.
 - Un fichier n'est importé qu'une fois (empreinte SHA-256). Une même manche enregistrée par deux joueurs
   n'est gardée qu'une fois. `--remplacer` réimporte.
@@ -63,7 +85,7 @@ python r6_db.py plan --worldid 436375283234 --z 2.9 --supprimer
 Tables : `partie`, `manche`, `joueur`, `carte`, `plan_carte`, `participation` (un joueur dans une manche : opérateur, rôle, mort,
 kills, distance parcourue), `evenement` (avec la position du tueur et de la victime au moment du kill),
 `position`, `orientation`. Vues : `v_parties`, `v_manches`, `v_participation`, `v_stats_joueur`,
-`v_stats_operateur`, `v_stats_carte`, `v_duels`, `v_kills_allies`. Les mêmes statistiques existent en
+`v_stats_operateur`, `v_stats_carte`, `v_stats_site`, `v_duels`, `v_kills_allies`, `v_positions`. Les mêmes statistiques existent en
 fonctions avec un numéro de partie (`NULL` = toutes) :
 
 ```sql

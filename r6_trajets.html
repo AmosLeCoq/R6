@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trajets R6 · __TITRE__</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2129; --muted: #6b7280; --line: #e3e6eb;
+    --map: #ffffff; --grid: #eef0f3; --accent: #3b5bdb; --heat: 59, 91, 219; --ok: #2b8a3e; --ko: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111418; --panel: #1a1e24; --ink: #e8eaed; --muted: #9aa1ab; --line: #2a3038;
+      --map: #15191e; --grid: #1f242b; --accent: #748ffc; --heat: 116, 143, 252; --ok: #69db7c; --ko: #ff8787;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111418; --panel: #1a1e24; --ink: #e8eaed; --muted: #9aa1ab; --line: #2a3038;
+    --map: #15191e; --grid: #1f242b; --accent: #748ffc; --heat: 116, 143, 252; --ok: #69db7c; --ko: #ff8787;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 14px 16px 8px; }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 650; }
+  #resume { color: var(--muted); }
+  .kpis { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-width: 96px; }
+  .kpi b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .kpi span { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; padding: 0 16px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #mapwrap { position: relative; height: min(72vh, 760px); min-height: 360px; overflow: hidden; border-radius: 10px; background: var(--map); }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  button, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  label.small { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .window { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; flex: 1 1 320px; }
+  .window input[type="range"] { flex: 1 1 120px; min-width: 0; }
+  .window output { font-variant-numeric: tabular-nums; min-width: 44px; color: var(--ink); }
+  aside { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; padding: 10px 12px 6px; }
+  .round { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); cursor: pointer; user-select: none; }
+  .round.off { opacity: .4; }
+  #rounds { max-height: 46vh; overflow-y: auto; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .rname { font-weight: 600; }
+  .rsub { color: var(--muted); font-size: 12px; }
+  .res { font-size: 12px; text-align: right; white-space: nowrap; }
+  .gagnée { color: var(--ok); } .perdue { color: var(--ko); }
+  .actions { display: flex; gap: 6px; padding: 6px 12px 10px; }
+  .note { color: var(--muted); font-size: 12px; padding: 8px 12px 12px; }
+  #levels { display: flex; gap: 4px 8px; align-items: center; flex-wrap: wrap; padding: 0 12px 12px; }
+  .lvl { display: flex; justify-content: space-between; gap: 8px; padding: 4px 12px; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; border-radius: 3px; background: var(--accent); margin: 0 12px 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div id="resume"></div>
+  <div class="kpis" id="kpis"></div>
+</header>
+<main>
+  <section class="card">
+    <div id="mapwrap"><canvas id="map"></canvas></div>
+    <div class="controls">
+      <div class="window">
+        <label class="small">De <input type="range" id="t0" step="1"><output id="t0v"></output></label>
+        <label class="small">à <input type="range" id="t1" step="1"><output id="t1v"></output></label>
+      </div>
+      <label class="small">Affichage
+        <select id="mode"><option value="trajets">trajets</option><option value="chaleur">carte de chaleur</option><option value="both">les deux</option></select>
+      </label>
+      <label class="small"><input type="checkbox" id="marks" checked> Kills et morts</label>
+      <span id="floors" class="small"></span>
+    </div>
+  </section>
+  <aside>
+    <div class="card"><h2>Manches</h2><div id="rounds"></div>
+      <div class="actions"><button id="all">Tout</button><button id="none">Aucune</button></div></div>
+    <div class="card"><h2>Temps passé par niveau</h2><div id="levelstats"></div>
+      <div class="note">Sur la fenêtre de temps choisie et les manches cochées. Le temps est compté depuis le début de
+        l'action (négatif = préparation). Rond = départ, étoile = kill (trait vers la victime), croix = mort.
+        Molette : zoom · glisser : déplacer · double-clic : recadrer.</div></div>
+  </aside>
+</main>
+<script>
+const D = /*__DONNEES__*/null;
+const $ = (id) => document.getElementById(id);
+$("title").textContent = D.titre;
+$("resume").textContent = D.sous_titre;
+const rounds = D.manches.map((r) => ({ ...r, on: true }));
+let floor = -1;
+const fmtT = (s) => { const n = s < 0; s = Math.abs(Math.round(s)); return `${n ? "−" : ""}${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+// fenêtre de temps (depuis le début de l'action)
+let tMin = Infinity, tMax = -Infinity;
+for (const r of rounds) for (const q of r.points) { tMin = Math.min(tMin, q[0]); tMax = Math.max(tMax, q[0]); }
+tMin = Math.floor(Math.max(tMin, -45)); tMax = Math.ceil(tMax);
+for (const id of ["t0", "t1"]) { $(id).min = tMin; $(id).max = tMax; }
+$("t0").value = Math.min(0, tMax); $("t1").value = tMax;
+const win = () => { const a = +$("t0").value, b = +$("t1").value; return [Math.min(a, b), Math.max(a, b)]; };
+
+// ---------------------------------------------------------------- vue
+const cv = $("map"), ctx = cv.getContext("2d");
+const bbox = (() => {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const r of rounds) for (const q of r.points) { x0 = Math.min(x0, q[1]); x1 = Math.max(x1, q[1]); y0 = Math.min(y0, q[2]); y1 = Math.max(y1, q[2]); }
+  for (const p of D.plans) { x0 = Math.min(x0, p.cx); x1 = Math.max(x1, p.cx); y0 = Math.min(y0, p.cy); y1 = Math.max(y1, p.cy); }
+  return { x0, x1, y0, y1 };
+})();
+let view = null;
+function fit() {
+  const w = cv.clientWidth, h = cv.clientHeight, pad = 30;
+  const s = Math.min((w - 2 * pad) / (bbox.x1 - bbox.x0 || 1), (h - 2 * pad) / (bbox.y1 - bbox.y0 || 1));
+  view = { s, cx: (bbox.x0 + bbox.x1) / 2, cy: (bbox.y0 + bbox.y1) / 2 };
+}
+const sx = (x) => cv.clientWidth / 2 + (x - view.cx) * view.s;
+const sy = (y) => cv.clientHeight / 2 - (y - view.cy) * view.s;
+function resize() {
+  const r = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * r; cv.height = cv.clientHeight * r;
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+  if (!view) fit();
+  draw();
+}
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const k = Math.exp(-e.deltaY * 0.0015), rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const wx = view.cx + (mx - cv.clientWidth / 2) / view.s, wy = view.cy - (my - cv.clientHeight / 2) / view.s;
+  view.s *= k;
+  view.cx = wx - (mx - cv.clientWidth / 2) / view.s; view.cy = wy + (my - cv.clientHeight / 2) / view.s;
+  draw();
+}, { passive: false });
+let drag = null;
+cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  view.cx = drag.cx - (e.clientX - drag.x) / view.s; view.cy = drag.cy + (e.clientY - drag.y) / view.s;
+  draw();
+});
+cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("dblclick", () => { fit(); draw(); });
+
+// ---------------------------------------------------------------- niveaux et plans
+const inFloor = (z) => floor < 0 || (z >= D.etages[floor][0] && z < D.etages[floor][1]);
+const levelOf = (z) => Math.max(0, D.etages.findIndex(([lo, hi]) => z >= lo && z < hi));
+for (const p of D.plans) { p.img = new Image(); p.img.onload = () => draw(); p.img.src = p.image; }
+function planFor(i) {
+  const z = D.etages.length ? D.etages[Math.max(i, 0)][2] : 0;
+  let best = null;
+  for (const p of D.plans) if (Math.abs(p.z - z) <= 1.5 && (!best || Math.abs(p.z - z) < Math.abs(best.z - z))) best = p;
+  return best;
+}
+function drawPlan() {
+  const p = planFor(floor);
+  if (!p || !p.img.complete || !p.img.naturalWidth) return;
+  ctx.save(); ctx.globalAlpha = p.op;
+  ctx.translate(sx(p.cx), sy(p.cy)); ctx.rotate(-p.rot * Math.PI / 180); ctx.scale(view.s * p.mpp, view.s * p.mpp);
+  ctx.drawImage(p.img, -p.img.naturalWidth / 2, -p.img.naturalHeight / 2);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- dessin
+function star(X, Y, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * 0.45 : r;
+    ctx.lineTo(X + rr * Math.cos(a), Y + rr * Math.sin(a));
+  }
+  ctx.closePath();
+}
+function draw() {
+  if (!view) return;
+  const w = cv.clientWidth, h = cv.clientHeight, css = getComputedStyle(document.documentElement);
+  const [a, b] = win(), mode = $("mode").value, bg = css.getPropertyValue("--map"), ink = css.getPropertyValue("--ink");
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = css.getPropertyValue("--grid"); ctx.lineWidth = 1; ctx.beginPath();
+  const step = 10, gx0 = Math.floor((view.cx - w / 2 / view.s) / step) * step, gy0 = Math.floor((view.cy - h / 2 / view.s) / step) * step;
+  for (let x = gx0; sx(x) < w; x += step) { ctx.moveTo(sx(x), 0); ctx.lineTo(sx(x), h); }
+  for (let y = gy0; sy(y) > 0; y += step) { ctx.moveTo(0, sy(y)); ctx.lineTo(w, sy(y)); }
+  ctx.stroke();
+  drawPlan();
+
+  // carte de chaleur : temps passé par case de 1 m
+  if (mode !== "trajets") {
+    const cells = new Map(); let max = 0;
+    for (const r of rounds) {
+      if (!r.on) continue;
+      const pts = r.points;
+      for (let i = 0; i < pts.length; i++) {
+        const q = pts[i];
+        if (q[0] < a || q[0] > b || !inFloor(q[3])) continue;
+        const dt = i + 1 < pts.length ? Math.min(pts[i + 1][0] - q[0], 1) : 0.1;
+        const k = `${Math.floor(q[1])},${Math.floor(q[2])}`;
+        const v = (cells.get(k) || 0) + dt;
+        cells.set(k, v); max = Math.max(max, v);
+      }
+    }
+    const heat = css.getPropertyValue("--heat").trim();
+    for (const [k, v] of cells) {
+      const [cx, cy] = k.split(",").map(Number);
+      ctx.fillStyle = `rgba(${heat}, ${0.12 + 0.78 * Math.sqrt(v / max)})`;
+      ctx.fillRect(sx(cx), sy(cy + 1), view.s + 0.5, view.s + 0.5);
+    }
+  }
+  // trajets
+  if (mode !== "chaleur") {
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    for (const r of rounds) {
+      if (!r.on) continue;
+      ctx.strokeStyle = r.couleur; ctx.lineWidth = D.densite ? 1.6 : 2.2;
+      let prev = null, first = null;
+      for (const q of r.points) {
+        if (q[0] < a || q[0] > b) { prev = null; continue; }
+        if (!first) first = q;
+        if (prev && q[0] - prev[0] <= 1.0) {
+          ctx.globalAlpha = inFloor(q[3]) ? (D.densite ? 0.3 : 0.9) : 0.08;
+          ctx.beginPath(); ctx.moveTo(sx(prev[1]), sy(prev[2])); ctx.lineTo(sx(q[1]), sy(q[2])); ctx.stroke();
+        }
+        prev = q;
+      }
+      if (first && inFloor(first[3])) {
+        ctx.globalAlpha = 1; ctx.fillStyle = r.couleur; ctx.strokeStyle = bg; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(sx(first[1]), sy(first[2]), 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+      }
+    }
+  }
+  // kills et morts
+  if ($("marks").checked) {
+    for (const r of rounds) {
+      if (!r.on) continue;
+      for (const k of r.kills) {
+        if (k.t < a || k.t > b || k.x === null || !inFloor(k.z)) continue;
+        const X = sx(k.x), Y = sy(k.y);
+        if (k.vx !== null) {
+          ctx.globalAlpha = 0.7; ctx.strokeStyle = r.couleur; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+          ctx.beginPath(); ctx.moveTo(X, Y); ctx.lineTo(sx(k.vx), sy(k.vy)); ctx.stroke(); ctx.setLineDash([]);
+        }
+        ctx.globalAlpha = 1; ctx.fillStyle = r.couleur; ctx.strokeStyle = bg; ctx.lineWidth = 2;
+        star(X, Y, 9); ctx.fill(); ctx.stroke();
+      }
+      const d = r.mort;
+      if (d && d.x !== null && d.t >= a && d.t <= b && inFloor(d.z)) {
+        const X = sx(d.x), Y = sy(d.y);
+        ctx.globalAlpha = 1; ctx.lineWidth = 5; ctx.strokeStyle = bg;
+        ctx.beginPath(); ctx.moveTo(X - 7, Y - 7); ctx.lineTo(X + 7, Y + 7); ctx.moveTo(X + 7, Y - 7); ctx.lineTo(X - 7, Y + 7); ctx.stroke();
+        ctx.lineWidth = 3; ctx.strokeStyle = r.couleur; ctx.stroke();
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+  $("t0v").textContent = fmtT(+$("t0").value); $("t1v").textContent = fmtT(+$("t1").value);
+  stats();
+}
+
+// ---------------------------------------------------------------- panneaux
+function stats() {
+  const [a, b] = win();
+  const per = D.etages.map(() => 0);
+  let kills = 0, morts = 0, n = 0;
+  for (const r of rounds) {
+    if (!r.on) continue;
+    n++;
+    const pts = r.points;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const q = pts[i];
+      if (q[0] < a || q[0] > b) continue;
+      if (per.length) per[levelOf(q[3])] += Math.min(pts[i + 1][0] - q[0], 1);
+    }
+    kills += r.kills.filter((k) => k.t >= a && k.t <= b).length;
+    if (r.mort && r.mort.t >= a && r.mort.t <= b) morts++;
+  }
+  const tot = per.reduce((s, v) => s + v, 0) || 1;
+  $("levelstats").innerHTML = "";
+  D.etages.forEach((e, i) => {
+    const row = document.createElement("div"); row.className = "lvl";
+    row.innerHTML = `<span>Niveau ${i} <span style="color:var(--muted)">(z ≈ ${e[2]} m)</span></span><b>${Math.round(100 * per[i] / tot)} %</b>`;
+    const bar = document.createElement("div"); bar.className = "bar"; bar.style.width = `calc(${(100 * per[i] / tot).toFixed(1)}% - 24px)`;
+    $("levelstats").append(row, bar);
+  });
+  const kp = [[n, "manches cochées"], [kills, "kills dans la fenêtre"], [morts, "morts dans la fenêtre"],
+              [n ? (kills / n).toFixed(2) : "–", "kills par manche"]];
+  $("kpis").innerHTML = kp.map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join("");
+}
+for (const r of rounds) {
+  const el = document.createElement("div");
+  el.className = "round";
+  el.innerHTML = `<span class="dot" style="background:${r.couleur}"></span><div><div class="rname"></div><div class="rsub"></div></div><div class="res"></div>`;
+  el.querySelector(".rname").textContent = `Partie ${r.partie} · manche ${r.manche}`;
+  el.querySelector(".rsub").textContent = (r.site ? `${r.site} · ` : "") + `${r.operateur} · ${r.kills.length} kill(s)` +
+    (r.mort ? ` · mort à ${fmtT(r.mort.t)}${r.mort.tueur ? " (" + r.mort.tueur + ")" : ""}` : " · survit");
+  const res = el.querySelector(".res");
+  res.textContent = r.victoire === null ? "" : r.victoire ? "gagnée" : "perdue";
+  res.className = "res " + (r.victoire === null ? "" : r.victoire ? "gagnée" : "perdue");
+  el.onclick = () => { r.on = !r.on; el.classList.toggle("off", !r.on); draw(); };
+  r.el = el; $("rounds").appendChild(el);
+}
+const setAll = (v) => { for (const r of rounds) { r.on = v; r.el.classList.toggle("off", !v); } draw(); };
+$("all").onclick = () => setAll(true);
+$("none").onclick = () => setAll(false);
+if (D.etages.length > 1) {
+  const box = $("floors");
+  box.append("Niveau ");
+  const mk = (label, i) => {
+    const b = document.createElement("button"); b.textContent = label;
+    if (i >= 0) b.title = `hauteur z ≈ ${D.etages[i][2]} m`;
+    b.onclick = () => { floor = i; [...box.querySelectorAll("button")].forEach((x) => x.classList.remove("on")); b.classList.add("on"); draw(); };
+    if (i === -1) b.classList.add("on");
+    box.appendChild(b);
+  };
+  mk("tous", -1);
+  D.etages.forEach((f, i) => mk(`${i}`, i));
+}
+for (const id of ["t0", "t1"]) $(id).oninput = draw;
+$("mode").onchange = draw;
+$("marks").onchange = draw;
+window.addEventListener("resize", resize);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+resize();
+</script>
+</body>
+</html>

@@ -57,6 +57,8 @@ FEED_SIG = b"\x59\x34\xe5\x8b\x04"         # paquet du fil d'événements (kill,
 KILLER_TAG = b"\xd9\x13\x3c\xba"           # précédé de 0x22, suivi de <longueur u8><pseudo>
 TARGET_TAG = b"\xac\x19\x0f\x70"
 MESSAGE_TAG = b"\x26\xe3\x09\x00\x79\x00\x00\x00\x00"   # suivi de <longueur u8><texte>
+SITE_SIG = b"\xaf\x98\x99\xca"             # + <u8 longueur><texte> : lieu d'apparition, « pièce 1<br/>pièce 2 » pour un site
+SITE_CURRENT = b"\xfc\xc6\xa8\x60\x01"     # 150 octets après le texte : marque le site choisi (d'après r6-dissect)
 PROP_SIG = b"\x60\x73\x85\xfe"             # paquet de propriété d'entité (positions dans le canal principal)
 PTR_RX = rb"....[\x00-\xff]\x02\x00\x00"                 # adresse mémoire 64 bits 0x0000_02xx_xxxx_xxxx
 
@@ -67,10 +69,11 @@ OUTLIER_DXY = 2.0        # m : écart max à la médiane des voisins avant de re
 OUTLIER_DZ = 2.5
 VIEWER_STEP = 0.1        # s : pas d'échantillonnage des positions dans le lecteur HTML
 
-# Identifiants de cartes (source : projet r6-dissect, https://github.com/redraskal/r6-dissect)
+# Identifiants de cartes (source : projet r6-dissect, https://github.com/redraskal/r6-dissect ;
+# 436375283234 = Littoral en Y11, identifié à partir d'un replay de l'utilisateur)
 MAPS = {837214085: "Clubhouse", 1378191338: "Café Dostoïevski", 1460220617: "Canal", 1767965020: "Yacht",
         2609218856: "Avion présidentiel", 2609221242: "Consulat", 2697268122: "Université Bartlett",
-        42090092951: "Littoral", 53627213396: "Tour", 88107330328: "Villa", 126196841359: "Forteresse",
+        42090092951: "Littoral", 436375283234: "Littoral", 53627213396: "Tour", 88107330328: "Villa", 126196841359: "Forteresse",
         127951053400: "Base d'Hereford", 199824623654: "Parc d'attractions", 231702797556: "Oregon",
         237873412352: "Maison", 259816839773: "Chalet", 276279025182: "Gratte-ciel", 305979357167: "Frontière",
         329867321446: "Favela", 355496559878: "Banque", 362605108559: "Outback", 365284490964: "Emerald Plains",
@@ -285,6 +288,24 @@ def read_events(raw, fi, clock):
         e["t"] = round(float(clock.time(e["frame"])), 2)
         e["phase"], e["chrono"] = clock.chrono(e["frame"])
     return out
+
+
+def read_site(raw):
+    """Site de la bombe choisi par la défense, ex. « 1er Salon narguilé, 1er Salle de billard » (langue du jeu)."""
+    found, current = [], None
+    for m in re.finditer(re.escape(SITE_SIG), raw):
+        o = m.end()
+        if o >= len(raw):
+            continue
+        n = raw[o]
+        txt = raw[o + 1:o + 1 + n]
+        if b"<br/>" not in txt:
+            continue
+        name = txt.decode("utf-8", "replace").replace("<br/>", ", ")
+        found.append(name)
+        if raw[o + 1 + n + 150:o + 1 + n + 155] == SITE_CURRENT:
+            current = name
+    return current or (found[-1] if found else None)
 
 
 # ----------------------------------------------------------------------------- positions
@@ -773,6 +794,8 @@ def analyse(path, noms="", verbose=True):
     if clock.end_frame:
         log.append(f"  fin de manche à l'image {clock.end_frame} (t = {float(clock.time(clock.end_frame)):.1f} s)")
 
+    site = read_site(raw)
+    log.append(f"Site de la bombe : {site or 'inconnu'}")
     events = read_events(raw, fi, clock)
     log.append(f"Événements : {len(events)}")
     for e in events:
@@ -871,7 +894,7 @@ def analyse(path, noms="", verbose=True):
     chrono = {"t": [round(float(x), 3) for x in clock.t], "restant": [int(v) for v in clock.vals],
               "phase": [clock.phase_name(int(p)) for p in clock.phase]}
     return {"meta": meta, "players": players, "rec_player": rec_player, "carte": carte, "worldid": world,
-            "numero": numero, "title": title, "clock": clock, "events": events, "entries": entries,
+            "numero": numero, "title": title + (f" · {site}" if site else ""), "site": site, "clock": clock, "events": events, "entries": entries,
             "roles": roles, "vainqueur": winner, "condition": condition, "etages": fl, "fin": round(t_end, 2),
             "phases": phases, "chrono": chrono, "log": log}
 
