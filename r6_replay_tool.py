@@ -698,9 +698,11 @@ def resample_facing(t, yaw, pitch, t_min, t_max):
     return out
 
 
-def viewer_data(title, joueurs, events, phases, etages, fin, chrono):
-    """Données du lecteur HTML (aussi reconstruites depuis la base par r6_db.py)."""
+def viewer_data(title, joueurs, events, phases, etages, fin, chrono, carte=None, plans=None):
+    """Données du lecteur HTML (aussi reconstruites depuis la base par r6_db.py).
+    carte = {worldid, nom} ; plans = [{z, image (data URL), cx, cy, mpp, rot, op}] (images calées de la carte)."""
     return {
+        "carte": carte or {"worldid": 0, "nom": ""}, "plans": plans or [],
         "titre": title,
         "joueurs": [{k: p[k] for k in ("pseudo", "operateur", "role", "couleur", "entite", "mort", "points", "vue")}
                     for p in joueurs],
@@ -919,7 +921,8 @@ def main():
 
     print("Rendu...")
     render_png(entries, outdir, R["title"])
-    write_viewer(viewer_data(R["title"], entries, events, R["phases"], R["etages"], R["fin"], R["chrono"]),
+    write_viewer(viewer_data(R["title"], entries, events, R["phases"], R["etages"], R["fin"], R["chrono"],
+                             {"worldid": R["worldid"], "nom": MAPS.get(R["worldid"], "")}),
                  os.path.join(outdir, "manche.html"))
     with open(os.path.join(outdir, "resume.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(R["log"]) + "\n")

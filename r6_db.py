@@ -14,13 +14,16 @@ Usage :
     python r6_db.py voir --partie 2 --manche 5             lecteur HTML d'une manche, depuis la base
     python r6_db.py stats [--partie 2]                     bilan par joueur
     python r6_db.py stats --joueur nitramossur1            détail : opérateurs, cartes, duels
+    python r6_db.py carte 436375283234 "Nom de la carte"   nomme une carte inconnue
+    python r6_db.py plan --worldid ... --z 2.9 --image plan.png --calage "cx,cy,mpp,rot"
+                                                           plan d'un niveau, calé dans le lecteur
 
 Connexion : variable d'environnement R6_DB ou option --db,
 par défaut postgresql://r6:r6@localhost:5432/r6
 
 Dépendances :  pip install -r requirements.txt   (psycopg en plus de celles de r6_replay_tool.py)
 """
-import argparse, datetime, hashlib, json, math, os, sys, uuid
+import argparse, base64, datetime, hashlib, json, math, mimetypes, os, sys, uuid
 
 try:
     import psycopg
@@ -96,6 +99,12 @@ def import_one(db, path, noms="", replace=False):
             return f"déjà importé (manche {row[0]})"
     R = T.analyse(path, noms, verbose=False)
     meta = R["meta"]
+    with db.cursor() as cur:                                 # nom de carte donné avec « r6_db.py carte »
+        cur.execute("SELECT nom FROM carte WHERE worldid = %s", (R["worldid"],))
+        row = cur.fetchone()
+    if row:
+        R["carte"] = row[0]
+        R["title"] = f"{row[0]} · manche {R['numero'] if R['numero'] else '?'}"
     try:
         partie_id = uuid.UUID(meta["id"])
     except (KeyError, ValueError):
@@ -279,11 +288,16 @@ def cmd_journal(db, a):
 def viewer_from_db(db, mid):
     """Données du lecteur HTML d'une manche, entièrement lues dans la base."""
     with db.cursor() as cur:
-        cur.execute("SELECT titre, phases, horloge, etages, duree_s FROM manche WHERE id = %s", (mid,))
+        cur.execute("""SELECT m.titre, m.phases, m.horloge, m.etages, m.duree_s, p.worldid, p.carte
+                       FROM manche m JOIN partie p ON p.id = m.partie_id WHERE m.id = %s""", (mid,))
         row = cur.fetchone()
         if not row:
             sys.exit(f"Pas de manche {mid}.")
-        titre, phases, horloge, etages, fin = row
+        titre, phases, horloge, etages, fin, worldid, carte = row
+        cur.execute("SELECT z, image, mime, fichier, cx, cy, mpp, rot, opacite FROM plan_carte WHERE worldid = %s", (worldid,))
+        plans = [{"z": z, "image": f"data:{mime};base64," + base64.b64encode(img).decode(), "fichier": fichier,
+                  "cx": cx, "cy": cy, "mpp": mpp, "rot": rot, "op": op}
+                 for z, img, mime, fichier, cx, cy, mpp, rot, op in cur.fetchall()]
         cur.execute("""SELECT profil, pseudo, operateur, role, couleur, entite, mort_s FROM participation
                        WHERE manche_id = %s ORDER BY role, lower(pseudo)""", (mid,))
         joueurs = []
@@ -308,7 +322,8 @@ def viewer_from_db(db, mid):
                        LEFT JOIN participation pv ON pv.manche_id = e.manche_id AND pv.profil = e.victime
                        WHERE e.manche_id = %s ORDER BY e.t_s""", (mid,))
         events = [dict(zip(("t", "type", "texte", "phase", "chrono", "tueur", "victime"), r)) for r in cur.fetchall()]
-    return T.viewer_data(titre, joueurs, events, phases, etages, fin, horloge)
+    return T.viewer_data(titre, joueurs, events, phases, etages, fin, horloge,
+                         {"worldid": worldid, "nom": "" if carte.startswith("carte inconnue") else carte}, plans)
 
 
 INDEX_HTML = """<!doctype html>
@@ -401,6 +416,72 @@ def cmd_stats(db, a):
         print_table(cur, "Tué par")
 
 
+def cmd_carte(db, a):
+    with db.cursor() as cur:
+        if a.worldid is None:
+            cur.execute("""SELECT p.worldid, p.carte, count(DISTINCT p.id) AS parties,
+                                  (SELECT count(*) FROM plan_carte pc WHERE pc.worldid = p.worldid) AS plans
+                           FROM partie p GROUP BY p.worldid, p.carte ORDER BY p.carte""")
+            print_table(cur, "Cartes")
+            return
+        if not a.nom:
+            sys.exit('Donne aussi le nom, ex. : python r6_db.py carte 436375283234 "Nom de la carte"')
+        cur.execute("INSERT INTO carte (worldid, nom) VALUES (%s, %s) ON CONFLICT (worldid) DO UPDATE SET nom = EXCLUDED.nom",
+                    (a.worldid, a.nom))
+        cur.execute("UPDATE partie SET carte = %s WHERE worldid = %s", (a.nom, a.worldid))
+        cur.execute("""UPDATE manche m SET titre = %s || ' · manche ' || m.numero
+                       FROM partie p WHERE p.id = m.partie_id AND p.worldid = %s""", (a.nom, a.worldid))
+        n = cur.rowcount
+    db.commit()
+    print(f"Carte {a.worldid} nommée « {a.nom} » ({n} manche(s) mises à jour).")
+
+
+def cmd_plan(db, a):
+    with db.cursor() as cur:
+        if a.liste or a.worldid is None:
+            cur.execute("""SELECT worldid, z, fichier, round(cx::numeric, 2) AS cx, round(cy::numeric, 2) AS cy,
+                                  round((1 / mpp)::numeric, 2) AS px_par_m, rot, opacite,
+                                  pg_size_pretty(length(image)::bigint) AS taille
+                           FROM plan_carte ORDER BY worldid, z""")
+            print_table(cur, "Plans enregistrés")
+            return
+        if a.z is None:
+            sys.exit("Indique le niveau avec --z (hauteur affichée dans le lecteur, panneau « Plan de la carte »).")
+        if a.supprimer:
+            cur.execute("DELETE FROM plan_carte WHERE worldid = %s AND abs(z - %s) < 0.05", (a.worldid, a.z))
+            db.commit()
+            print(f"{cur.rowcount} plan(s) supprimé(s).")
+            return
+        cal = None
+        if a.calage:
+            try:
+                cal = [float(v) for v in a.calage.split(",")]
+                assert len(cal) == 4 and cal[2] > 0
+            except (ValueError, AssertionError):
+                sys.exit('--calage attend "cx,cy,mpp,rot" (copié depuis le lecteur), ex. "50.1,62.3,0.0712,1.5".')
+        cur.execute("SELECT 1 FROM plan_carte WHERE worldid = %s AND abs(z - %s) < 0.05", (a.worldid, a.z))
+        exists = cur.fetchone() is not None
+        if a.image:
+            with open(a.image, "rb") as f:
+                img = f.read()
+            mime = mimetypes.guess_type(a.image)[0] or "image/png"
+            if not mime.startswith("image/"):
+                sys.exit(f"{a.image} n'est pas une image.")
+            if cal is None:
+                sys.exit("Pour un nouveau plan, donne aussi --calage (copié depuis le lecteur).")
+            cur.execute("DELETE FROM plan_carte WHERE worldid = %s AND abs(z - %s) < 0.05", (a.worldid, a.z))
+            cur.execute("""INSERT INTO plan_carte (worldid, z, image, mime, fichier, cx, cy, mpp, rot, opacite)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (a.worldid, a.z, img, mime, os.path.basename(a.image), *cal, a.opacite))
+        elif exists and cal is not None:
+            cur.execute("""UPDATE plan_carte SET cx = %s, cy = %s, mpp = %s, rot = %s, opacite = %s
+                           WHERE worldid = %s AND abs(z - %s) < 0.05""", (*cal, a.opacite, a.worldid, a.z))
+        else:
+            sys.exit("Rien à faire : donne --image et --calage pour un nouveau plan, ou --calage pour recaler un plan existant.")
+    db.commit()
+    print(f"Plan enregistré pour la carte {a.worldid}, niveau z = {a.z}. Régénère les lecteurs avec « voir ».")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Base PostgreSQL des replays R6 Siege")
     ap.add_argument("--db", default=os.environ.get("R6_DB", DEFAULT_DB), help="URL PostgreSQL (ou variable R6_DB)")
@@ -421,6 +502,17 @@ def main():
         p.add_argument("--manche", type=int, dest="manche_num", help="numéro de la manche dans la partie")
         if name == "voir":
             p.add_argument("-o", "--out", help="fichier (une manche) ou dossier (toute une partie)")
+    p = sub.add_parser("carte", help="liste les cartes, ou donne un nom à une carte inconnue")
+    p.add_argument("worldid", type=int, nargs="?")
+    p.add_argument("nom", nargs="?")
+    p = sub.add_parser("plan", help="enregistre l'image calée d'un niveau de carte (calage fait dans le lecteur)")
+    p.add_argument("--worldid", type=int)
+    p.add_argument("--z", type=float, help="hauteur du niveau (m)")
+    p.add_argument("--image")
+    p.add_argument("--calage", help='"cx,cy,mpp,rot" copié depuis le lecteur')
+    p.add_argument("--opacite", type=float, default=0.6)
+    p.add_argument("--liste", action="store_true")
+    p.add_argument("--supprimer", action="store_true")
     p = sub.add_parser("stats", help="statistiques")
     p.add_argument("--joueur", help="pseudo (accepte % comme joker)")
     p.add_argument("--partie", type=int, help="seulement cette partie")
@@ -428,7 +520,7 @@ def main():
     db = connect(a.db)
     try:
         {"init": cmd_init, "import": cmd_import, "parties": cmd_parties, "liste": cmd_liste, "voir": cmd_voir,
-         "journal": cmd_journal, "stats": cmd_stats}[a.cmd](db, a)
+         "journal": cmd_journal, "stats": cmd_stats, "carte": cmd_carte, "plan": cmd_plan}[a.cmd](db, a)
     finally:
         db.close()
 

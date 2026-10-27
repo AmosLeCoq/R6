@@ -29,6 +29,27 @@ python r6_db.py stats --joueur nitramossur1    # opérateurs, cartes, victimes, 
 python r6_db.py journal --partie 2 --manche 5  # résumé d'analyse (identification des joueurs)
 ```
 
+### Plan de la carte
+
+Le lecteur peut afficher une image de la carte sous les joueurs (une image par niveau). Le script ne fournit
+pas d'images : utilise une capture ou un plan de la carte.
+
+1. Ouvre une manche (`voir`), choisis le niveau avec les boutons « Niveau », puis ouvre le panneau
+   « Plan de la carte » et charge ton image.
+2. Cale-la sur les traces grises des joueurs : glisser pour la déplacer, Maj + molette pour l'agrandir,
+   Alt + molette ou le champ « Rotation » pour la tourner. Le calage est retenu par le navigateur.
+3. Copie la commande affichée en bas du panneau, remplace `CHEMIN/VERS/...` par le vrai chemin de
+   l'image et lance-la. Le plan est enregistré dans la base et ajouté à tous les lecteurs de cette carte
+   (régénère-les avec `voir`).
+
+```
+python r6_db.py carte                                   # cartes en base (worldid, nom, nombre de plans)
+python r6_db.py carte 436375283234 "Nom de la carte"    # nomme une carte inconnue (titres et stats)
+python r6_db.py plan --liste                            # plans enregistrés
+python r6_db.py plan --worldid 436375283234 --z 2.9 --calage "..."     # recaler un plan existant
+python r6_db.py plan --worldid 436375283234 --z 2.9 --supprimer
+```
+
 - Connexion : variable `R6_DB` ou option `--db` (défaut `postgresql://r6:r6@localhost:5432/r6`).
 - Chaque match est une `partie` distincte (identifiant du match écrit dans les `.rec`), avec un numéro court
   attribué à l'import. Chaque manche a aussi un `id` unique dans toute la base : `voir 37` marche aussi.
@@ -39,7 +60,7 @@ python r6_db.py journal --partie 2 --manche 5  # résumé d'analyse (identificat
 - Les joueurs sont identifiés par leur `profileid` Ubisoft : les stats suivent un joueur même s'il change de pseudo.
 - Les kills sur un coéquipier sont enregistrés mais ne comptent ni dans les kills, ni dans les duels.
 
-Tables : `partie`, `manche`, `joueur`, `participation` (un joueur dans une manche : opérateur, rôle, mort,
+Tables : `partie`, `manche`, `joueur`, `carte`, `plan_carte`, `participation` (un joueur dans une manche : opérateur, rôle, mort,
 kills, distance parcourue), `evenement` (avec la position du tueur et de la victime au moment du kill),
 `position`, `orientation`. Vues : `v_parties`, `v_manches`, `v_participation`, `v_stats_joueur`,
 `v_stats_operateur`, `v_stats_carte`, `v_duels`, `v_kills_allies`. Les mêmes statistiques existent en

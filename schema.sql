@@ -97,6 +97,26 @@ CREATE INDEX IF NOT EXISTS orientation_manche_profil_t ON orientation (manche_id
 CREATE INDEX IF NOT EXISTS evenement_manche ON evenement (manche_id, t_s);
 CREATE INDEX IF NOT EXISTS participation_profil ON participation (profil);
 
+-- Nom des cartes que le jeu ne permet pas d'identifier (worldid absent de la table de r6_replay_tool.py)
+CREATE TABLE IF NOT EXISTS carte (
+    worldid         bigint PRIMARY KEY,
+    nom             text NOT NULL
+);
+
+-- Plans des cartes : une image par niveau, calée sur les coordonnées du jeu
+CREATE TABLE IF NOT EXISTS plan_carte (
+    worldid         bigint NOT NULL,
+    z               real NOT NULL,                    -- hauteur typique du niveau (m), voir « Niveaux détectés »
+    image           bytea NOT NULL,
+    mime            text NOT NULL,
+    fichier         text,
+    cx real NOT NULL, cy real NOT NULL,               -- centre de l'image dans le repère du jeu (m)
+    mpp             real NOT NULL,                    -- mètres par pixel
+    rot             real NOT NULL DEFAULT 0,          -- rotation (degrés, sens trigonométrique)
+    opacite         real NOT NULL DEFAULT 0.6,
+    PRIMARY KEY (worldid, z)
+);
+
 -- Numéro court de partie (1, 2, 3... dans l'ordre d'import), ajouté aux bases existantes par init
 ALTER TABLE partie ADD COLUMN IF NOT EXISTS num int UNIQUE;
 UPDATE partie SET num = s.n

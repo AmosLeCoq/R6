@@ -55,6 +55,14 @@
   .ev.past { opacity: .55; }
   .ev .when { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; padding: 8px 12px 12px; }
+  details summary { cursor: pointer; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 10px 12px; }
+  .planbox { display: flex; flex-direction: column; gap: 8px; padding: 0 12px 12px; }
+  .planbox .note { padding: 0; }
+  .planbox label.small { flex-wrap: wrap; }
+  .planbox input[type="range"] { flex: 1 1 120px; min-width: 0; }
+  .planbox input[type="file"] { max-width: 100%; font-size: 12px; color: var(--muted); }
+  .planbox input[type="number"] { width: 72px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; }
+  #plancmd { width: 100%; font: 12px/1.4 ui-monospace, monospace; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; resize: vertical; }
 </style>
 </head>
 <body>
@@ -83,6 +91,17 @@
   </section>
   <aside>
     <div class="card"><h2>Joueurs</h2><div id="players"></div></div>
+    <div class="card"><details id="plancard"><summary>Plan de la carte</summary>
+      <div class="planbox">
+        <div class="note" id="planinfo"></div>
+        <label class="small">Image du niveau <b id="planlvl"></b> <input type="file" id="planfile" accept="image/*"></label>
+        <label class="small" style="display:grid;grid-template-columns:auto 1fr;gap:6px"><input type="checkbox" id="planedit"><span>Ajuster : glisser déplace le plan, Maj + molette l'agrandit, Alt + molette le tourne</span></label>
+        <label class="small">Échelle <input type="range" id="planscale" min="-2" max="2" step="0.001" value="0"><span id="planscaleval"></span></label>
+        <label class="small">Rotation <input type="range" id="planrot" min="-180" max="180" step="0.25" value="0"><input type="number" id="planrotnum" step="0.25" value="0">°</label>
+        <label class="small">Opacité <input type="range" id="planop" min="0.1" max="1" step="0.05" value="0.6"></label>
+        <div class="note">Une fois le plan calé, lance cette commande (avec le vrai chemin de l'image) pour l'enregistrer : il apparaîtra dans tous les lecteurs de cette carte.</div>
+        <textarea id="plancmd" readonly rows="4"></textarea>
+      </div></details></div>
     <div class="card"><h2>Événements</h2><div id="events"></div>
       <div class="note">Clique sur un événement pour y aller. Molette : zoom · glisser : déplacer · double-clic : recadrer.
         Cercle vide = dernière position connue (le replay n'a pas la position à cet instant).
@@ -108,6 +127,31 @@ let bbox = (() => {
   return { x0, x1, y0, y1 };
 })();
 let view = null;
+// ---------------------------------------------------------------- plans de la carte (images calées)
+// plan = {z, image (data URL), cx, cy (centre, m), mpp (m par pixel), rot (degrés, sens trigo), op}
+const CARTE = D.carte || { worldid: 0, nom: "" };
+const plans = (D.plans || []).map((p) => ({ ...p }));
+for (const p of plans) loadImg(p);
+function loadImg(p) { p.img = new Image(); p.img.onload = () => draw(); p.img.src = p.image; }
+const levelZ = (i) => (D.etages.length ? D.etages[Math.max(i, 0)][2] : 0);
+function planFor(i) {           // plan du niveau i (celui dont la hauteur est la plus proche, à 1,5 m près)
+  const z = levelZ(i);
+  let best = null;
+  for (const p of plans) if (Math.abs(p.z - z) <= 1.5 && (!best || Math.abs(p.z - z) < Math.abs(best.z - z))) best = p;
+  return best;
+}
+const editLevel = () => Math.max(floor, 0);
+function drawPlan() {
+  const p = planFor(editLevel());
+  if (!p || !p.img || !p.img.complete || !p.img.naturalWidth) return;
+  ctx.save();
+  ctx.globalAlpha = p.op;
+  ctx.translate(sx(p.cx), sy(p.cy));
+  ctx.rotate(-p.rot * Math.PI / 180);                  // y écran vers le bas : sens trigo = rotation négative
+  ctx.scale(view.s * p.mpp, view.s * p.mpp);
+  ctx.drawImage(p.img, -p.img.naturalWidth / 2, -p.img.naturalHeight / 2);
+  ctx.restore();
+}
 function fit() {
   const w = cv.clientWidth, h = cv.clientHeight, pad = 30;
   const s = Math.min((w - 2 * pad) / (bbox.x1 - bbox.x0 || 1), (h - 2 * pad) / (bbox.y1 - bbox.y0 || 1));
@@ -124,6 +168,13 @@ function resize() {
 }
 cv.addEventListener("wheel", (e) => {
   e.preventDefault();
+  const p = editing();
+  if (p && (e.shiftKey || e.altKey)) {
+    const d = e.deltaY || e.deltaX;
+    if (e.shiftKey) p.mpp *= Math.exp(-d * 0.0005);
+    else p.rot = Math.round((p.rot - d * 0.02) * 100) / 100;
+    planChanged(); return;
+  }
   const k = Math.exp(-e.deltaY * 0.0015), rect = cv.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   const wx = view.cx + (mx - cv.clientWidth / 2) / view.s, wy = view.cy - (my - cv.clientHeight / 2) / view.s;
@@ -132,9 +183,18 @@ cv.addEventListener("wheel", (e) => {
   ghost = null; draw();
 }, { passive: false });
 let drag = null;
-cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); });
+const editing = () => $("planedit").checked && planFor(editLevel());
+cv.addEventListener("pointerdown", (e) => {
+  const p = editing();
+  drag = p ? { x: e.clientX, y: e.clientY, plan: p, cx: p.cx, cy: p.cy } : { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy };
+  cv.setPointerCapture(e.pointerId);
+});
 cv.addEventListener("pointermove", (e) => {
   if (!drag) return;
+  if (drag.plan) {
+    drag.plan.cx = drag.cx + (e.clientX - drag.x) / view.s; drag.plan.cy = drag.cy - (e.clientY - drag.y) / view.s;
+    planChanged(); return;
+  }
   view.cx = drag.cx - (e.clientX - drag.x) / view.s; view.cy = drag.cy + (e.clientY - drag.y) / view.s;
   ghost = null; draw();
 });
@@ -217,6 +277,7 @@ function draw() {
   for (let x = gx0; sx(x) < w; x += step) { ctx.moveTo(sx(x), 0); ctx.lineTo(sx(x), h); }
   for (let y = gy0; sy(y) > 0; y += step) { ctx.moveTo(0, sy(y)); ctx.lineTo(w, sy(y)); }
   ctx.stroke();
+  drawPlan();
   if (!ghost) drawGhost();
   ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(ghost, 0, 0); ctx.restore();
 
@@ -333,13 +394,71 @@ if (D.etages.length > 1) {
   const mk = (label, i) => {
     const b = document.createElement("button"); b.textContent = label;
     if (i >= 0) b.title = `hauteur z ≈ ${D.etages[i][2]} m`;
-    b.onclick = () => { floor = i; [...box.querySelectorAll("button")].forEach((x) => x.classList.remove("on")); b.classList.add("on"); ghost = null; draw(); };
+    b.onclick = () => { floor = i; [...box.querySelectorAll("button")].forEach((x) => x.classList.remove("on")); b.classList.add("on"); ghost = null; syncPlanUI(); draw(); };
     if (i === -1) b.classList.add("on");
     box.appendChild(b);
   };
   mk("tous", -1);
   D.etages.forEach((f, i) => mk(names[i], i));
 }
+
+// ---------------------------------------------------------------- calage du plan
+const storeKey = (z) => `r6plan:${CARTE.worldid}:${z}`;
+function saveLocal(p) {
+  try { localStorage.setItem(storeKey(p.z), JSON.stringify({ cx: p.cx, cy: p.cy, mpp: p.mpp, rot: p.rot, op: p.op })); } catch (e) {}
+}
+function planChanged() {
+  const p = planFor(editLevel());
+  if (p) { saveLocal(p); syncPlanUI(); }
+  draw();
+}
+function syncPlanUI() {
+  const lvl = editLevel(), p = planFor(lvl);
+  $("planlvl").textContent = D.etages.length > 1 ? `${lvl} (z ≈ ${levelZ(lvl)} m)` : "";
+  $("planinfo").textContent = (CARTE.nom ? CARTE.nom + " · " : "") + `worldid ${CARTE.worldid}. ` +
+    (p ? "Plan chargé pour ce niveau." : "Pas de plan pour ce niveau : choisis une image (capture du plan de la carte).") +
+    (D.etages.length > 1 ? " Le niveau se choisit avec les boutons « Niveau » sous la carte." : "");
+  for (const id of ["planedit", "planscale", "planrot", "planrotnum", "planop"]) $(id).disabled = !p;
+  if (!p) { $("plancmd").value = ""; return; }
+  p.base = p.base || p.mpp;
+  $("planscale").value = Math.log2(p.mpp / p.base);
+  $("planscaleval").textContent = `${(1 / p.mpp).toFixed(1)} px/m`;
+  $("planrot").value = p.rot; $("planrotnum").value = p.rot; $("planop").value = p.op;
+  $("plancmd").value = `python r6_db.py plan --worldid ${CARTE.worldid} --z ${p.z} ` +
+    (p.fichier ? `--image "CHEMIN/VERS/${p.fichier}" ` : "") +
+    `--calage "${p.cx.toFixed(3)},${p.cy.toFixed(3)},${p.mpp.toPrecision(6)},${p.rot}" --opacite ${p.op}`;
+}
+$("planfile").onchange = () => {
+  const f = $("planfile").files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const z = levelZ(editLevel());
+    let p = planFor(editLevel());
+    if (!p) { p = { z, op: 0.6, rot: 0 }; plans.push(p); }
+    p.image = rd.result; p.fichier = f.name;
+    p.img = new Image();
+    p.img.onload = () => {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(storeKey(z)) || "null"); } catch (e) {}
+      if (saved) Object.assign(p, saved);
+      else {          // premier essai : l'image couvre la zone parcourue par les joueurs
+        p.cx = (bbox.x0 + bbox.x1) / 2; p.cy = (bbox.y0 + bbox.y1) / 2;
+        p.mpp = Math.max(bbox.x1 - bbox.x0, bbox.y1 - bbox.y0) * 1.15 / Math.max(p.img.naturalWidth, p.img.naturalHeight);
+      }
+      p.base = p.mpp;
+      $("planedit").checked = true;
+      planChanged();
+    };
+    p.img.src = p.image;
+  };
+  rd.readAsDataURL(f);
+};
+$("planscale").oninput = () => { const p = planFor(editLevel()); if (p) { p.mpp = p.base * Math.pow(2, +$("planscale").value); planChanged(); } };
+$("planrot").oninput = () => { const p = planFor(editLevel()); if (p) { p.rot = +$("planrot").value; planChanged(); } };
+$("planrotnum").onchange = () => { const p = planFor(editLevel()); if (p) { p.rot = +$("planrotnum").value || 0; planChanged(); } };
+$("planop").oninput = () => { const p = planFor(editLevel()); if (p) { p.op = +$("planop").value; planChanged(); } };
+$("planedit").onchange = () => { cv.style.cursor = $("planedit").checked ? "move" : "grab"; };
 
 // frise : kills et phases
 const ticks = $("ticks");
@@ -382,6 +501,7 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "ArrowRight") { t = Math.min(END, t + 5); draw(); }
   if (e.code === "ArrowLeft") { t = Math.max(0, t - 5); draw(); }
 });
+syncPlanUI();
 window.addEventListener("resize", resize);
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { ghost = null; draw(); });
 resize();
